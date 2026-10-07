@@ -43,8 +43,22 @@ function slug(chain: ChainId): string {
   return s;
 }
 
-export async function kyberRoute(chain: ChainId, tokenIn: string, tokenOut: string, amountIn: string): Promise<KyberRoute> {
+export interface KyberFee {
+  /** Комиссия в bps (50 = 0.5%) */
+  bps: number;
+  receiver: string;
+  /** С какой стороны сделки брать комиссию: мы всегда берём с нативной монеты */
+  chargeFeeBy: 'currency_in' | 'currency_out';
+}
+
+export async function kyberRoute(chain: ChainId, tokenIn: string, tokenOut: string, amountIn: string, fee?: KyberFee): Promise<KyberRoute> {
   const q = new URLSearchParams({ tokenIn, tokenOut, amountIn, gasInclude: 'true', source: CLIENT_ID });
+  if (fee && fee.bps > 0) {
+    q.set('feeAmount', String(fee.bps));
+    q.set('isInBps', 'true');
+    q.set('chargeFeeBy', fee.chargeFeeBy);
+    q.set('feeReceiver', fee.receiver);
+  }
   const res = await getJson<KyberResp<KyberRoute>>(`${API}/${slug(chain)}/api/v1/routes?${q}`, {
     ttlMs: 0,
     headers: { 'x-client-id': CLIENT_ID },

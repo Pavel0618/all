@@ -1,9 +1,17 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { confirmDialog } from '../lib/telegram';
 import { DEFAULT_SETTINGS, settingsStore, useStore, answersStore } from '../lib/storage';
 import { DEFAULT_NARRATIVES, type Narrative } from '../lib/narratives';
 import { DEFAULT_THRESHOLDS, type Thresholds } from '../lib/analysis';
 import type { PriorityLevel } from '../lib/jupiter';
-import { toast } from '../lib/ui';
+import { connectModal, toast } from '../lib/ui';
+import { useConnection } from '@solana/wallet-adapter-react';
+import { PublicKey, Transaction } from '@solana/web3.js';
+import { createAtaIdempotentIx, feeConfigured, feePercentLabel, isSolanaFeeAccountReady, solanaFeeOwnerKey } from '../lib/fees';
+import { FEE_EVM_WALLET, FEE_SOLANA_WALLET } from '../config';
+import { SOL_MINT, waitForSignature } from '../lib/jupiter';
+import { shortAddr } from '../lib/format';
+import { useSolSigner } from '../wallet/solSigner';
 
 const PRIORITY: { id: PriorityLevel; label: string; hint: string }[] = [
   { id: 'medium', label: 'Обычная', hint: 'дешевле, может проходить дольше' },
@@ -133,6 +141,8 @@ export function Settings() {
         </div>
       </section>
 
+      <FeeSection />
+
       <section className="card">
         <h2>Данные</h2>
         <p className="muted small">Всё хранится только в этом браузере. Сервера у приложения нет.</p>
@@ -148,8 +158,8 @@ export function Settings() {
           </button>
           <button
             className="btn btn-small btn-ghost"
-            onClick={() => {
-              if (!confirm('Вернуть все настройки по умолчанию?')) return;
+            onClick={async () => {
+              if (!(await confirmDialog('Вернуть все настройки по умолчанию?'))) return;
               setSettings(DEFAULT_SETTINGS);
               setRpc(DEFAULT_SETTINGS.solanaRpc);
             }}
@@ -168,5 +178,76 @@ function NumField({ label, value, onChange }: { label: string; value: number; on
       <span className="small muted">{label}</span>
       <input inputMode="numeric" value={String(value)} onChange={(e) => onChange(e.target.value)} />
     </label>
+  );
+}
+
+/** Прозрачно показываем комиссию сервиса; владельцу — кнопка подготовки счёта для комиссий в SOL. */
+function FeeSection() {
+  const { connection } = useConnection();
+  const signer = useSolSigner();
+  const on = feeConfigured();
+  const [ready, setReady] = useState<boolean>();
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (on.solana) isSolanaFeeAccountReady(connection).then(setReady);
+  }, [connection, on.solana]);
+
+  if (!on.solana && !on.evm) return null;
+  const owner = solanaFeeOwnerKey();
+
+  const createAccount = async () => {
+    if (!owner) return;
+    if (!signer.publicKey) {
+      connectModal.set(true);
+      return;
+    }
+    setBusy(true);
+    try {
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+      const tx = new Transaction({ feePayer: signer.publicKey, blockhash, lastValidBlockHeight }).add(
+        createAtaIdempotentIx(signer.publicKey, owner, new PublicKey(SOL_MINT)),
+      );
+      const sig = await signer.send(tx, connection);
+      await waitForSignature(connection, sig, lastValidBlockHeight);
+      setReady(await isSolanaFeeAccountReady(connection, true));
+      toast('ok', 'Счёт для комиссий создан — комиссия в SOL включена');
+    } catch (e) {
+      toast('error', (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="card">
+      <h2>Комиссия сервиса</h2>
+      <p className="small">
+        С каждой сделки берётся <b>{feePercentLabel()}</b> — она уже учтена в котировке «Вы получите». Это дешевле большинства Telegram-ботов для
+        торговли мемкоинами (обычно около 1%).
+      </p>
+      {on.solana && (
+        <div className="small">
+          Solana → <code>{shortAddr(FEE_SOLANA_WALLET)}</code> (в SOL){' '}
+          {ready === undefined ? '' : ready ? <span className="text-ok">· активна</span> : <span className="text-warn">· ждёт счёт для приёма</span>}
+        </div>
+      )}
+      {on.evm && (
+        <div className="small">
+          Ethereum / Base / BNB / Arbitrum → <code>{shortAddr(FEE_EVM_WALLET)}</code> (в ETH/BNB) <span className="text-ok">· активна</span>
+        </div>
+      )}
+      {on.solana && ready === false && (
+        <div className="owner-box">
+          <p className="small">
+            <b>Для владельца.</b> Чтобы получать комиссию в SOL, у адреса должен быть счёт wSOL — его создают один раз (≈0.002 SOL, платит
+            подключённый кошелёк). Пока счёта нет, сделки проходят без комиссии.
+          </p>
+          <button className="btn btn-small btn-primary" disabled={busy} onClick={createAccount}>
+            {busy ? 'Создаём…' : signer.publicKey ? 'Создать счёт для комиссий' : 'Подключить кошелёк'}
+          </button>
+        </div>
+      )}
+    </section>
   );
 }

@@ -5,13 +5,34 @@
 // или укажите свой браузер: CHROMIUM_PATH=/path/to/chrome npm run e2e
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 const { chromium } = require('playwright');
 const { Keypair, TransactionMessage, VersionedTransaction, SystemProgram, PublicKey } = require('@solana/web3.js');
 
 const ROOT = path.join(__dirname, '..');
-const DIST = path.join(ROOT, 'dist');
+const DIST = path.join(__dirname, 'dist');
 const OUT = path.join(__dirname, 'screenshots');
 fs.mkdirSync(OUT, { recursive: true });
+
+// Сборка с включённой комиссией и настройками Telegram-бота
+const FEE_SOL_OWNER = Keypair.generate().publicKey;
+const FEE_EVM = '0x3333333333333333333333333333333333333333';
+const WSOL = new PublicKey('So11111111111111111111111111111111111111112');
+const TOKEN_PROGRAM = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+const ATA_PROGRAM = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+const FEE_ATA = PublicKey.findProgramAddressSync([FEE_SOL_OWNER.toBuffer(), TOKEN_PROGRAM.toBuffer(), WSOL.toBuffer()], ATA_PROGRAM)[0].toBase58();
+execSync('npx vite build --outDir e2e/dist --emptyOutDir', {
+  cwd: ROOT,
+  stdio: 'ignore',
+  env: {
+    ...process.env,
+    VITE_FEE_BPS: '50',
+    VITE_FEE_SOLANA_WALLET: FEE_SOL_OWNER.toBase58(),
+    VITE_FEE_EVM_WALLET: FEE_EVM,
+    VITE_TG_BOT: 'gemradar_bot',
+    VITE_TG_APP: 'radar',
+  },
+});
 
 // Тестовый кошелёк и «транзакция», которую якобы вернул Jupiter
 const FX = (() => {
@@ -77,6 +98,69 @@ const json = (body, status = 200) => ({
 
 const unknownRpc = new Set();
 const evmSent = [];
+const jupQuotes = [];
+const jupSwaps = [];
+const kyberRoutes = [];
+const solRawSent = [];
+const evmRawSent = [];
+const evmRawHosts = [];
+
+function swapTxFor(userPublicKey) {
+  const payer = new PublicKey(userPublicKey);
+  const msg = new TransactionMessage({
+    payerKey: payer,
+    recentBlockhash: '4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi',
+    instructions: [SystemProgram.transfer({ fromPubkey: payer, toPubkey: new PublicKey('11111111111111111111111111111112'), lamports: 1 })],
+  }).compileToV0Message();
+  return Buffer.from(new VersionedTransaction(msg).serialize()).toString('base64');
+}
+
+const hex64 = (c) => '0x' + c.repeat(64);
+function evmRpc(r) {
+  const pad = (h) => '0x' + h.replace(/^0x/, '').padStart(64, '0');
+  switch (r.method) {
+    case 'eth_chainId':
+      return '0x2105';
+    case 'eth_getTransactionCount':
+      return '0x0';
+    case 'eth_estimateGas':
+      return '0x30d40';
+    case 'eth_maxPriorityFeePerGas':
+      return '0x1';
+    case 'eth_gasPrice':
+      return '0x2';
+    case 'eth_blockNumber':
+      return '0x21';
+    case 'eth_getBalance':
+      return '0xde0b6b3a7640000';
+    case 'eth_getBlockByNumber':
+      return {
+        number: '0x20', hash: hex64('c'), parentHash: hex64('0'), timestamp: '0x1', baseFeePerGas: '0x1', gasLimit: '0x1c9c380', gasUsed: '0x0',
+        miner: '0x' + '0'.repeat(40), difficulty: '0x0', totalDifficulty: '0x0', extraData: '0x', logsBloom: '0x' + '0'.repeat(512),
+        nonce: '0x0000000000000000', sha3Uncles: hex64('0'), size: '0x1', stateRoot: hex64('0'), transactionsRoot: hex64('0'),
+        receiptsRoot: hex64('0'), mixHash: hex64('0'), transactions: [], uncles: [],
+      };
+    case 'eth_call': {
+      const data = r.params[0].data || r.params[0].input || '';
+      if (data.startsWith('0x70a08231')) return pad((1000n * 10n ** 18n).toString(16));
+      if (data.startsWith('0x313ce567')) return pad('12');
+      if (data.startsWith('0xdd62ed3e')) return pad('0');
+      return '0x';
+    }
+    case 'eth_sendRawTransaction':
+      evmRawSent.push(r.params[0]);
+      return '0x' + String(evmRawSent.length).padStart(64, 'd');
+    case 'eth_getTransactionReceipt':
+      return {
+        blockHash: hex64('b'), blockNumber: '0x20', contractAddress: null, cumulativeGasUsed: '0x5208', effectiveGasPrice: '0x1',
+        from: '0x' + '2'.repeat(40), gasUsed: '0x5208', logs: [], logsBloom: '0x' + '0'.repeat(512), status: '0x1', to: '0x' + '6'.repeat(40),
+        transactionHash: r.params[0], transactionIndex: '0x0', type: '0x2',
+      };
+    default:
+      unknownRpc.add('evm:' + r.method);
+      return null;
+  }
+}
 
 async function routeAll(page) {
   await page.route('**/*', async (route) => {
@@ -159,7 +243,9 @@ async function routeAll(page) {
 
     if (host === 'lite-api.jup.ag') {
       if (url.pathname.endsWith('/quote')) {
+        jupQuotes.push(url.toString());
         const sell = url.searchParams.get('outputMint') === 'So11111111111111111111111111111111111111112';
+        const feeBps = Number(url.searchParams.get('platformFeeBps') || 0);
         return route.fulfill(
           json({
             inputMint: url.searchParams.get('inputMint'),
@@ -171,6 +257,9 @@ async function routeAll(page) {
             slippageBps: Number(url.searchParams.get('slippageBps')),
             priceImpactPct: '0.0123',
             routePlan: [{ swapInfo: { label: 'Raydium CPMM' } }],
+            platformFee: feeBps
+              ? { amount: String(Math.floor((Number(sell ? '480000000' : url.searchParams.get('amount')) * feeBps) / 10000)), feeBps }
+              : null,
           }),
         );
       }
@@ -179,13 +268,16 @@ async function routeAll(page) {
         if (!body.quoteResponse || !body.userPublicKey || !body.prioritizationFeeLamports?.priorityLevelWithMaxLamports) {
           return route.fulfill(json({ error: 'bad request' }, 400));
         }
-        return route.fulfill(json({ swapTransaction: FX.swapTx, lastValidBlockHeight: 1000 }));
+        jupSwaps.push(body);
+        if (body.quoteResponse.platformFee && !body.feeAccount) return route.fulfill(json({ error: 'feeAccount required' }, 400));
+        return route.fulfill(json({ swapTransaction: swapTxFor(body.userPublicKey), lastValidBlockHeight: 1000 }));
       }
     }
 
     if (host === 'aggregator-api.kyberswap.com') {
       if (req.headers()['x-client-id'] !== 'gem-radar') return route.fulfill(json({ code: 4001, message: 'no client id' }, 400));
       if (url.pathname.endsWith('/routes')) {
+        kyberRoutes.push(url.toString());
         const tokenIn = url.searchParams.get('tokenIn');
         const sell = tokenIn.toLowerCase() === EVM_TOKEN.toLowerCase();
         return route.fulfill(
@@ -217,7 +309,15 @@ async function routeAll(page) {
         const ctx = { context: { slot: 1, apiVersion: '2.0.0' } };
         switch (r.method) {
           case 'getAccountInfo':
+            if (r.params?.[1]?.encoding !== 'jsonParsed') {
+              // Счёт для комиссий (wSOL) существует, остальные — нет
+              if (r.params[0] !== FEE_ATA) return { ...ctx, value: null };
+              return { ...ctx, value: { data: [Buffer.alloc(165).toString('base64'), 'base64'], executable: false, lamports: 2039280, owner: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', rentEpoch: 0, space: 165 } };
+            }
             return { ...ctx, value: { data: { program: 'spl-token', parsed: { type: 'mint', info: { decimals: 6, supply: '1000000000000000', isInitialized: true } }, space: 82 }, executable: false, lamports: 1461600, owner: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', rentEpoch: 0, space: 82 } };
+          case 'sendTransaction':
+            solRawSent.push(r.params[0]);
+            return '5'.repeat(87);
           case 'getBalance':
             return { ...ctx, value: 2_500_000_000 };
           case 'getTokenAccountsByOwner':
@@ -242,6 +342,13 @@ async function routeAll(page) {
         }
       };
       const res = Array.isArray(body) ? body.map((r) => ({ jsonrpc: '2.0', id: r.id, result: handle(r) })) : { jsonrpc: '2.0', id: body.id, result: handle(body) };
+      return route.fulfill(json(res));
+    }
+
+    if (/rpc\.publicnode\.com$/.test(host) && host !== 'solana-rpc.publicnode.com') {
+      const body = JSON.parse(req.postData() || '{}');
+      for (const r of [body].flat()) if (r.method === 'eth_sendRawTransaction') evmRawHosts.push(host);
+      const res = Array.isArray(body) ? body.map((r) => ({ jsonrpc: '2.0', id: r.id, result: evmRpc(r) })) : { jsonrpc: '2.0', id: body.id, result: evmRpc(body) };
       return route.fulfill(json(res));
     }
 
@@ -363,6 +470,63 @@ const INIT = ({ fx, evmAccount }) => {
   window.addEventListener('eip6963:requestProvider', announce);
 };
 
+const TG_INIT = ({ startParam }) => {
+  const store = () => {
+    const m = new Map();
+    return {
+      _m: m,
+      setItem: (k, v, cb) => {
+        m.set(k, v);
+        setTimeout(() => cb && cb(null, true));
+      },
+      getItem: (k, cb) => setTimeout(() => cb(null, m.has(k) ? m.get(k) : null)),
+      removeItem: (k, cb) => {
+        m.delete(k);
+        setTimeout(() => cb && cb(null, true));
+      },
+    };
+  };
+  const cmp = (a, b) => {
+    const x = a.split('.').map(Number);
+    const y = b.split('.').map(Number);
+    for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0);
+    return 0;
+  };
+  window.__tg = { links: [], tgLinks: [], haptics: [], back: [] };
+  const secure = store();
+  window.__tgSecure = secure;
+  window.Telegram = {
+    WebApp: {
+      initData: 'query_id=x',
+      initDataUnsafe: { start_param: startParam, user: { id: 1 } },
+      version: '9.1',
+      platform: 'ios',
+      colorScheme: 'dark',
+      isVersionAtLeast: (v) => cmp('9.1', v) >= 0,
+      ready() {},
+      expand() {},
+      setHeaderColor() {},
+      setBackgroundColor() {},
+      setBottomBarColor() {},
+      disableVerticalSwipes() {
+        window.__tg.noSwipe = true;
+      },
+      openLink: (u) => window.__tg.links.push(u),
+      openTelegramLink: (u) => window.__tg.tgLinks.push(u),
+      showConfirm: (m, cb) => setTimeout(() => cb(true)),
+      BackButton: { show: () => window.__tg.back.push('show'), hide: () => window.__tg.back.push('hide'), onClick() {}, offClick() {} },
+      HapticFeedback: {
+        impactOccurred: (s) => window.__tg.haptics.push(s),
+        notificationOccurred: (t) => window.__tg.haptics.push(t),
+        selectionChanged() {},
+      },
+      SecureStorage: secure,
+      DeviceStorage: store(),
+      CloudStorage: store(),
+    },
+  };
+};
+
 (async () => {
   const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
@@ -415,6 +579,9 @@ const INIT = ({ fx, evmAccount }) => {
   await page.locator('.trade .btn-buy').click();
   await page.waitForSelector('.toast-ok >> text=Куплено', { timeout: 20000 });
   check('Покупка Solana: транзакция отправлена кошельком', (await page.evaluate(() => window.__solSent)) === 1);
+  check('Комиссия Solana: platformFeeBps=50 в котировке', new URL(jupQuotes.at(-1)).searchParams.get('platformFeeBps') === '50');
+  check('Комиссия Solana: feeAccount = wSOL-счёт владельца', jupSwaps.at(-1)?.feeAccount === FEE_ATA, jupSwaps.at(-1)?.feeAccount);
+  check('Комиссия Solana: видна пользователю', /Комиссия сервиса 0,5%/.test(quoteText), quoteText.replace(/\n/g, ' | '));
   await shot('03-token-bought');
 
   // 5. Продажа
@@ -450,6 +617,10 @@ const INIT = ({ fx, evmAccount }) => {
   await page.locator('.trade .btn-buy').click();
   await page.waitForSelector('.toast-ok >> text=/Куплено.*BASED/', { timeout: 20000 });
   const sent = await page.evaluate(() => window.__evmSent);
+  {
+    const q = new URL(kyberRoutes.at(-1)).searchParams;
+    check('Комиссия Base (покупка): 50 bps с входа на адрес владельца', q.get('feeAmount') === '50' && q.get('isInBps') === 'true' && q.get('chargeFeeBy') === 'currency_in' && q.get('feeReceiver') === FEE_EVM);
+  }
   check('Покупка Base: tx в роутер KyberSwap с value', sent.length === 1 && sent[0].to.toLowerCase() === ROUTER.toLowerCase() && BigInt(sent[0].value) > 0n, JSON.stringify(sent[0]));
   // Продажа EVM: approve + swap
   await page.locator('.trade .seg-wide').getByRole('button', { name: 'Продать' }).click();
@@ -457,6 +628,7 @@ const INIT = ({ fx, evmAccount }) => {
   await page.locator('.trade .btn-sell').click();
   await page.waitForSelector('.toast-ok >> text=/Продано.*ETH/', { timeout: 20000 });
   const sent2 = await page.evaluate(() => window.__evmSent);
+  check('Комиссия Base (продажа): с выхода', new URL(kyberRoutes.at(-1)).searchParams.get('chargeFeeBy') === 'currency_out');
   check('Продажа Base: approve + swap', sent2.length === 3 && sent2[1].data.startsWith('0x095ea7b3') && sent2[2].data === '0xdeadbeef', JSON.stringify(sent2.map((t) => [t.to, t.data.slice(0, 10), t.value])));
   await shot('05-token-base');
 
@@ -485,6 +657,83 @@ const INIT = ({ fx, evmAccount }) => {
   await page.waitForSelector('.sec-list');
   await page.waitForTimeout(500);
   await shot('09-desktop-token');
+
+  // ================= Telegram Mini App =================
+  const tctx = await browser.newContext({ viewport: { width: 390, height: 800 }, deviceScaleFactor: 2 });
+  await tctx.addInitScript(TG_INIT, { startParam: `solana_${FX.tokenA}` });
+  const tp = await tctx.newPage();
+  tp.on('console', (m) => m.type() === 'error' && !/telegram-web-app|ERR_FAILED/.test(m.text() + (m.location()?.url ?? '')) && errors.push('[tg] ' + m.text()));
+  tp.on('pageerror', (e) => errors.push('[tg] PAGEERROR ' + e.message));
+  await routeAll(tp);
+  const tshot = (n) => tp.screenshot({ path: path.join(OUT, `${n}.png`), fullPage: false });
+
+  await tp.goto('http://localhost:4173/#tgWebAppData=query_id%3Dx&tgWebAppVersion=9.1&tgWebAppPlatform=ios');
+  await tp.waitForSelector('.verdict', { timeout: 15000 });
+  check('TG: диплинк startapp открыл токен', tp.url().endsWith(`#/token/solana/${FX.tokenA}`), tp.url());
+  const tgState = () => tp.evaluate(() => window.__tg);
+  check('TG: кнопка «Назад» показана, свайп-закрытие отключено', (await tgState()).back.at(-1) === 'show' && (await tgState()).noSwipe === true);
+
+  await tp.locator('.token-head a', { hasText: 'DexScreener' }).click();
+  check('TG: внешние ссылки через openLink', (await tgState()).links.some((u) => u.includes('dexscreener.com')));
+
+  await tp.getByRole('button', { name: 'Поделиться' }).click();
+  {
+    const l = (await tgState()).tgLinks.at(-1) || '';
+    check('TG: «Поделиться» — ссылка на Mini App с токеном', l.startsWith('https://t.me/share/url') && decodeURIComponent(l).includes(`https://t.me/gemradar_bot/radar?startapp=solana_${FX.tokenA}`), l.slice(0, 120));
+  }
+
+  await tp.locator('.trade').getByRole('button', { name: 'Подключить кошелёк' }).click();
+  await tp.getByRole('button', { name: 'Создать кошелёк' }).click();
+  await tp.waitForSelector('.key-box');
+  check('TG: ключи сохранены в SecureStorage', await tp.evaluate(() => window.__tgSecure._m.has('gr_wallet_v1')));
+  await tshot('10-tg-backup');
+  await tp.locator('.modal .risk-gate input').check();
+  await tp.getByRole('button', { name: 'Готово' }).click();
+  await tp.waitForSelector('.bw-acc');
+  const builtinAddr = await tp.evaluate(() => JSON.parse(window.__tgSecure._m.get('gr_wallet_v1')));
+  await tshot('11-tg-wallet');
+  await tp.getByRole('button', { name: 'Закрыть' }).click();
+
+  await tp.waitForSelector('.quote >> text=Комиссия сервиса', { timeout: 10000 });
+  await tp.locator('.trade .btn-buy').click();
+  await tp.waitForSelector('.toast-ok >> text=/Куплено.*FROGAI/', { timeout: 20000 });
+  {
+    const tx = VersionedTransaction.deserialize(Buffer.from(solRawSent.at(-1), 'base64'));
+    const signer = tx.message.staticAccountKeys[0].toBase58();
+    const signed = tx.signatures[0].some((b) => b !== 0);
+    check('TG: покупка подписана встроенным кошельком и отправлена в сеть', solRawSent.length === 1 && signed && jupSwaps.at(-1).userPublicKey === signer, signer);
+    check('TG: комиссия и во встроенном кошельке', jupSwaps.at(-1).feeAccount === FEE_ATA);
+    check('TG: вибро-отклик на успех', (await tgState()).haptics.includes('success'));
+  }
+  await tshot('12-tg-bought');
+
+  // Вывод SOL
+  await tp.locator('.wallet-btn').click();
+  await tp.locator('.bw-actions').getByRole('button', { name: 'Вывести' }).click();
+  await tp.locator('.modal').getByLabel('Адрес').fill(FX.address);
+  await tp.locator('.modal').getByLabel('Сумма').fill('0.1');
+  await tp.locator('.modal').getByRole('button', { name: 'Вывести', exact: true }).click();
+  await tp.waitForSelector('.toast-ok >> text=/Отправлено 0.1 SOL/', { timeout: 20000 });
+  check('TG: вывод SOL', solRawSent.length === 2);
+
+  // EVM во встроенном кошельке
+  await tp.goto(`http://localhost:4173/#/token/base/${EVM_TOKEN}`);
+  await tp.waitForSelector('.quote >> text=Вы получите', { timeout: 15000 });
+  await tp.locator('.trade .btn-buy').click();
+  await tp.waitForSelector('.toast-ok >> text=/Куплено.*BASED/', { timeout: 20000 });
+  check('TG: покупка на Base подписана встроенным EVM-ключом', evmRawSent.length === 1 && builtinAddr.evm.length === 66, `raw tx: ${evmRawSent.length}`);
+  check('TG: комиссия на Base', new URL(kyberRoutes.at(-1)).searchParams.get('feeReceiver') === FEE_EVM);
+  await tshot('13-tg-base');
+
+  // Вывод BNB, пока кошелёк «стоит» на Base: транзакция должна уйти в сеть BNB
+  await tp.locator('.wallet-btn').click();
+  await tp.locator('.bw-actions').getByRole('button', { name: 'Вывести' }).click();
+  await tp.locator('.modal').getByRole('button', { name: 'BNB Chain' }).click();
+  await tp.locator('.modal').getByLabel('Адрес').fill('0x4444444444444444444444444444444444444444');
+  await tp.locator('.modal').getByLabel('Сумма').fill('0.01');
+  await tp.locator('.modal').getByRole('button', { name: 'Вывести', exact: true }).click();
+  await tp.waitForSelector('.toast-ok >> text=/Отправлено 0.01 BNB/', { timeout: 20000 });
+  check('TG: вывод BNB уходит именно в сеть BNB', evmRawHosts.at(-1) === 'bsc-rpc.publicnode.com', evmRawHosts.join(','));
 
   console.log(results.join('\n'));
   console.log('unknown solana rpc:', [...unknownRpc].join(', ') || '—');

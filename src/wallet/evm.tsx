@@ -1,7 +1,25 @@
 // EVM-кошельки (MetaMask, Rabby, OKX, Phantom EVM, Coinbase…) через стандарт EIP-6963.
 // Без сторонних сервисов: работаем напрямую с расширением/встроенным браузером кошелька.
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { createPublicClient, createWalletClient, custom, erc20Abi, type Address, type EIP1193Provider, type Hex } from 'viem';
+import {
+  createPublicClient,
+  createWalletClient,
+  custom,
+  encodeFunctionData,
+  erc20Abi,
+  fallback,
+  http,
+  type Address,
+  type Chain,
+  type EIP1193Provider,
+  type Hex,
+  type PublicClient,
+  type WalletClient,
+} from 'viem';
+import { arbitrum, base, bsc, mainnet } from 'viem/chains';
+import { builtinStore } from './builtin';
+import { isTelegram } from '../lib/telegram';
+import { useMemory } from '../lib/ui';
 
 export interface EvmWalletInfo {
   uuid: string;
@@ -12,7 +30,8 @@ export interface EvmWalletInfo {
 
 interface EvmCtx {
   wallets: EvmWalletInfo[];
-  active?: EvmWalletInfo;
+  /** Подключённый кошелёк; uuid 'builtin' — встроенный кошелёк Telegram */
+  active?: { uuid: string; name: string; icon?: string };
   account?: Address;
   chainId?: number;
   connect: (w: EvmWalletInfo) => Promise<void>;
@@ -23,6 +42,8 @@ interface EvmCtx {
   tokenBalance: (token: Address) => Promise<{ raw: bigint; decimals: number }>;
   nativeBalance: () => Promise<bigint>;
   ensureAllowance: (token: Address, spender: Address, amount: bigint) => Promise<void>;
+  /** Операции строго в указанной сети (для встроенного кошелька — без ожидания перерисовки после смены сети) */
+  forChain: (chainId: number) => Ops;
 }
 
 const Ctx = createContext<EvmCtx | null>(null);
@@ -131,13 +152,49 @@ export function EvmProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // Встроенный кошелёк Telegram: сеть переключается мгновенно, без подтверждений
+  const builtin = useMemory(builtinStore);
+  const builtinAccount = isTelegram() && builtin.status === 'ready' ? builtin.evm : undefined;
+  const [builtinChainId, setBuiltinChainId] = useState(8453);
+
   const value = useMemo<EvmCtx>(() => {
+    if (builtinAccount) {
+      const opsFor = (id: number): Ops => {
+        const chain = VIEM_CHAINS[id];
+        if (!chain) throw new Error('Сеть не поддерживается');
+        const transport = fallback([http(PUBLIC_RPC[chain.id]), http()]);
+        return operations(
+          () => createPublicClient({ chain, transport }),
+          () => createWalletClient({ account: builtinAccount, chain, transport }),
+          builtinAccount.address,
+        );
+      };
+      return {
+        wallets,
+        active: { uuid: 'builtin', name: 'Встроенный кошелёк' },
+        account: builtinAccount.address,
+        chainId: builtinChainId,
+        connect: async () => undefined,
+        disconnect: () => undefined,
+        switchChain: async (target) => {
+          if (!VIEM_CHAINS[target]) throw new Error('Сеть не поддерживается');
+          setBuiltinChainId(target);
+        },
+        forChain: opsFor,
+        ...opsFor(builtinChainId),
+      };
+    }
+
     const need = () => {
       if (!active || !account) throw new Error('Подключите EVM-кошелёк');
       return { provider: active.provider, account };
     };
-    const publicClient = () => createPublicClient({ transport: custom(need().provider) });
-
+    // Расширение отправляет в ту сеть, на которой оно сейчас стоит — проверка сети в интерфейсе
+    const injectedOps = operations(
+      () => createPublicClient({ transport: custom(need().provider) }),
+      () => createWalletClient({ account: need().account, transport: custom(need().provider) }),
+      account,
+    );
     return {
       wallets,
       active,
@@ -150,44 +207,10 @@ export function EvmProvider({ children }: { children: ReactNode }) {
         await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: `0x${target.toString(16)}` }] });
         setChainId(target);
       },
-      sendTransaction: async ({ to, data, value }) => {
-        const { provider, account: from } = need();
-        const wallet = createWalletClient({ account: from, transport: custom(provider) });
-        return wallet.sendTransaction({ account: from, to, data, value: value ?? 0n, chain: null });
-      },
-      waitForReceipt: async (hash) => {
-        const r = await publicClient().waitForTransactionReceipt({ hash, timeout: 180_000 });
-        return r.status;
-      },
-      tokenBalance: async (token) => {
-        const { account: owner } = need();
-        const pc = publicClient();
-        const [raw, decimals] = await Promise.all([
-          pc.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [owner] }),
-          pc.readContract({ address: token, abi: erc20Abi, functionName: 'decimals' }),
-        ]);
-        return { raw, decimals };
-      },
-      nativeBalance: async () => publicClient().getBalance({ address: need().account }),
-      ensureAllowance: async (token, spender, amount) => {
-        const { provider, account: owner } = need();
-        const pc = publicClient();
-        const current = await pc.readContract({ address: token, abi: erc20Abi, functionName: 'allowance', args: [owner, spender] });
-        if (current >= amount) return;
-        const wallet = createWalletClient({ account: owner, transport: custom(provider) });
-        const hash = await wallet.writeContract({
-          account: owner,
-          address: token,
-          abi: erc20Abi,
-          functionName: 'approve',
-          args: [spender, amount],
-          chain: null,
-        });
-        const r = await pc.waitForTransactionReceipt({ hash, timeout: 180_000 });
-        if (r.status !== 'success') throw new Error('Разрешение (approve) не прошло');
-      },
+      forChain: () => injectedOps,
+      ...injectedOps,
     };
-  }, [wallets, active, account, chainId, connect, disconnect]);
+  }, [wallets, active, account, chainId, connect, disconnect, builtinAccount, builtinChainId]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
@@ -196,4 +219,50 @@ export function useEvm(): EvmCtx {
   const ctx = useContext(Ctx);
   if (!ctx) throw new Error('EvmProvider missing');
   return ctx;
+}
+
+const VIEM_CHAINS: Record<number, Chain> = { 1: mainnet, 8453: base, 56: bsc, 42161: arbitrum };
+
+/** Публичные узлы с поддержкой запросов из браузера (резерв — узел по умолчанию из viem). */
+const PUBLIC_RPC: Record<number, string> = {
+  1: 'https://ethereum-rpc.publicnode.com',
+  8453: 'https://base-rpc.publicnode.com',
+  56: 'https://bsc-rpc.publicnode.com',
+  42161: 'https://arbitrum-one-rpc.publicnode.com',
+};
+
+type Ops = Pick<EvmCtx, 'sendTransaction' | 'waitForReceipt' | 'tokenBalance' | 'nativeBalance' | 'ensureAllowance'>;
+
+/** Общие операции для любого кошелька: расширение (EIP-1193) или встроенный ключ. */
+function operations(pc: () => PublicClient, wc: () => WalletClient, owner: Address | undefined): Ops {
+  const need = () => {
+    if (!owner) throw new Error('Подключите EVM-кошелёк');
+    return owner;
+  };
+  const send = (tx: { to: Address; data?: Hex; value?: bigint }) => {
+    const w = wc();
+    return w.sendTransaction({ account: w.account ?? need(), to: tx.to, data: tx.data, value: tx.value ?? 0n, chain: w.chain ?? null });
+  };
+  return {
+    sendTransaction: (tx) => send(tx),
+    waitForReceipt: async (hash) => (await pc().waitForTransactionReceipt({ hash, timeout: 180_000 })).status,
+    tokenBalance: async (token) => {
+      const c = pc();
+      const [raw, decimals] = await Promise.all([
+        c.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [need()] }),
+        c.readContract({ address: token, abi: erc20Abi, functionName: 'decimals' }),
+      ]);
+      return { raw, decimals };
+    },
+    nativeBalance: async () => pc().getBalance({ address: need() }),
+    ensureAllowance: async (token, spender, amount) => {
+      const c = pc();
+      const current = await c.readContract({ address: token, abi: erc20Abi, functionName: 'allowance', args: [need(), spender] });
+      if (current >= amount) return;
+      const data = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [spender, amount] });
+      const hash = await send({ to: token, data });
+      const r = await c.waitForTransactionReceipt({ hash, timeout: 180_000 });
+      if (r.status !== 'success') throw new Error('Разрешение (approve) не прошло');
+    },
+  };
 }

@@ -6,6 +6,7 @@ import { answersStore, settingsStore, tokenKey, useStore, watchStore } from '../
 import { useToken } from '../lib/useToken';
 import { fmtAmount, fmtPct, fmtPrice, shortAddr, timeAgo } from '../lib/format';
 import { toast } from '../lib/ui';
+import { shareToken } from '../lib/telegram';
 import { SecurityList, StepCard, VerdictCard, type ToolLink } from './Steps';
 import { TokenIcon } from './TokenCard';
 import { TradePanel } from './TradePanel';
@@ -121,9 +122,23 @@ export function TokenPage({ chain: chainParam, address }: { chain: string; addre
               {shortAddr(address)} ⧉
             </button>
           </div>
-          <button className={`icon-btn star ${inWatch ? 'star-on' : ''}`} onClick={toggleWatch} aria-label="В избранное" title="В избранное">
-            {inWatch ? '★' : '☆'}
-          </button>
+          <div className="head-actions">
+            <button
+              className="icon-btn"
+              aria-label="Поделиться"
+              title="Поделиться"
+              onClick={async () => {
+                const r = await shareToken(chain, address, symbol || shortAddr(address));
+                if (r === 'copied') toast('ok', 'Ссылка скопирована');
+                if (r === 'failed') toast('error', 'Не удалось поделиться');
+              }}
+            >
+              ⤴
+            </button>
+            <button className={`icon-btn star ${inWatch ? 'star-on' : ''}`} onClick={toggleWatch} aria-label="В избранное" title="В избранное">
+              {inWatch ? '★' : '☆'}
+            </button>
+          </div>
         </div>
 
         {pair ? (

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { confirmDialog } from '../lib/telegram';
 import { CHAINS, toolLinks, type ChainId } from '../lib/chains';
 import { getTokensBatch, mainPair, type DexPair } from '../lib/dexscreener';
 import { buildPositions } from '../lib/portfolio';
@@ -118,8 +119,8 @@ export function Portfolio() {
           {trades.length > 0 && (
             <button
               className="btn btn-small btn-ghost"
-              onClick={() => {
-                if (confirm('Очистить историю сделок в этом браузере? Сами токены останутся на кошельке.')) setTrades([]);
+              onClick={async () => {
+                if (await confirmDialog('Очистить историю сделок на этом устройстве? Сами токены останутся на кошельке.')) setTrades([]);
               }}
             >
               Очистить

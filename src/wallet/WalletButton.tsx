@@ -4,10 +4,28 @@ import { useEvm } from './evm';
 import { connectModal, toast, useMemory } from '../lib/ui';
 import { metamaskBrowseLink, phantomBrowseLink, chainByEvmId } from '../lib/chains';
 import { shortAddr } from '../lib/format';
+import { isTelegram } from '../lib/telegram';
+import { builtinStore } from './builtin';
+import { BuiltinWallet } from './BuiltinWallet';
 
 export function WalletButton() {
   const sol = useWallet();
   const evm = useEvm();
+  const builtin = useMemory(builtinStore);
+  if (isTelegram()) {
+    const addr = builtin.solAddress?.toBase58();
+    return (
+      <button className={`btn ${addr ? 'btn-ghost' : 'btn-primary'} wallet-btn`} onClick={() => connectModal.set(true)}>
+        {addr ? (
+          <>
+            <span className="dot dot-ok" /> {shortAddr(addr)}
+          </>
+        ) : (
+          'Кошелёк'
+        )}
+      </button>
+    );
+  }
   const connected = [sol.publicKey ? shortAddr(sol.publicKey.toBase58()) : null, evm.account ? shortAddr(evm.account) : null].filter(Boolean);
 
   return (
@@ -28,6 +46,22 @@ export function ConnectModal() {
   const sol = useWallet();
   const evm = useEvm();
   if (!open) return null;
+
+  if (isTelegram()) {
+    return (
+      <div className="modal-backdrop" onClick={() => connectModal.set(false)}>
+        <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Кошелёк">
+          <div className="modal-head">
+            <h3>Кошелёк</h3>
+            <button className="icon-btn" onClick={() => connectModal.set(false)} aria-label="Закрыть">
+              ✕
+            </button>
+          </div>
+          <BuiltinWallet />
+        </div>
+      </div>
+    );
+  }
 
   const solWallets = sol.wallets.filter(
     (w) => w.readyState === WalletReadyState.Installed || w.readyState === WalletReadyState.Loadable,

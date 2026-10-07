@@ -1,12 +1,14 @@
 // Покупка и продажа прямо со страницы токена. Ключи остаются в кошельке пользователя:
 // приложение только собирает транзакцию через агрегатор и отдаёт её кошельку на подпись.
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { useConnection, useWallet } from '@solana/wallet-adapter-react';
+import { useConnection } from '@solana/wallet-adapter-react';
 import { LAMPORTS_PER_SOL, PublicKey, type ParsedAccountData } from '@solana/web3.js';
 import type { Address, Hex } from 'viem';
 import { CHAINS, toolLinks, type ChainId } from '../lib/chains';
 import { jupQuote, jupSwapTransaction, priceImpactPercent, routeLabel, SOL_MINT, waitForSignature, type JupQuote } from '../lib/jupiter';
-import { kyberBuild, kyberRoute, NATIVE, type KyberRoute } from '../lib/kyber';
+import { kyberBuild, kyberRoute, NATIVE, type KyberFee, type KyberRoute } from '../lib/kyber';
+import { evmFeeFor, feeConfigured, feePercentLabel, solanaFeeFor, type SolanaFee } from '../lib/fees';
+import { useSolSigner } from '../wallet/solSigner';
 import { addTrade, settingsStore, useStore } from '../lib/storage';
 import { connectModal, toast } from '../lib/ui';
 import { fmtAmount, fmtUsd, fromBaseUnits, toBaseUnits } from '../lib/format';
@@ -41,6 +43,7 @@ export function TradePanel({ token, verdict }: { token: TradeToken; verdict: Ver
   const [riskOk, setRiskOk] = useState(false);
   const risky = verdict === 'skip' || verdict === 'danger';
   const isSolana = CHAINS[token.chain].kind === 'solana';
+  const feeOn = feeConfigured();
 
   return (
     <section className="card trade" id="trade">
@@ -74,6 +77,9 @@ export function TradePanel({ token, verdict }: { token: TradeToken; verdict: Ver
         💡 <b>Фиксация:</b> «фикси тогда, когда другие начинают покупать». Простое правило: на ×2 продайте 50% — вернёте вложенное, остальное
         пусть летит. Монета ушла в боковик на хаях с пустым стаканом — выходите.
       </div>
+      {(isSolana ? feeOn.solana : feeOn.evm) && (
+        <div className="muted small center">Комиссия сервиса {feePercentLabel()} уже учтена в сумме «Вы получите».</div>
+      )}
       <div className="muted small center">
         Не работает встроенный обмен?{' '}
         <a href={toolLinks.externalSwap(token.chain, token.address)} target="_blank" rel="noreferrer">
@@ -180,9 +186,10 @@ function ActionButton(props: { mode: Mode; busy?: string; disabled?: boolean; on
 
 function SolanaTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; blocked: boolean }) {
   const { connection } = useConnection();
-  const wallet = useWallet();
+  const signer = useSolSigner();
   const [settings, setSettings] = useStore(settingsStore);
   const [amount, setAmount] = useState(String(settings.defaultBuy.solana ?? 0.1));
+  const [fee, setFee] = useState<SolanaFee>();
   const [sellPct, setSellPct] = useState(100);
   const [slippage, setSlippage] = useState(settings.slippageBps);
   const [quote, setQuote] = useState<JupQuote>();
@@ -193,7 +200,16 @@ function SolanaTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; 
   const [tokBal, setTokBal] = useState<{ raw: bigint; decimals: number }>();
   const [busy, setBusy] = useState<string>();
   const mint = token.address;
-  const owner = wallet.publicKey;
+  const owner = signer.publicKey;
+
+  // Комиссия сервиса (если владелец указал адрес и счёт для комиссий готов)
+  useEffect(() => {
+    let cancelled = false;
+    solanaFeeFor(connection).then((f) => !cancelled && setFee(f));
+    return () => {
+      cancelled = true;
+    };
+  }, [connection]);
 
   useEffect(() => {
     let key: PublicKey;
@@ -247,12 +263,13 @@ function SolanaTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; 
   }, [mode, amount, tokBal, sellPct]);
 
   const getQuote = useCallback(
-    (raw: bigint) =>
+    (raw: bigint, f: SolanaFee | undefined) =>
       jupQuote({
         inputMint: mode === 'buy' ? SOL_MINT : mint,
         outputMint: mode === 'buy' ? mint : SOL_MINT,
         amount: raw.toString(),
         slippageBps: slippage,
+        platformFeeBps: f?.bps,
       }),
     [mode, mint, slippage],
   );
@@ -266,7 +283,7 @@ function SolanaTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; 
     setQuoting(true);
     let cancelled = false;
     const t = setTimeout(() => {
-      getQuote(raw)
+      getQuote(raw, fee)
         .then((q) => !cancelled && setQuote(q))
         .catch((e: Error) => !cancelled && setQuoteErr(`Нет маршрута: ${e.message}`))
         .finally(() => !cancelled && setQuoting(false));
@@ -275,22 +292,35 @@ function SolanaTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; 
       cancelled = true;
       clearTimeout(t);
     };
-  }, [amountIn, getQuote]);
+  }, [amountIn, getQuote, fee]);
 
   const execute = async () => {
-    if (!owner || !wallet.sendTransaction) {
+    if (!owner) {
       connectModal.set(true);
       return;
     }
     const raw = amountIn();
     if (raw <= 0n) return;
     try {
+      // Одна и та же комиссия должна быть и в котировке, и в транзакции
+      let f = fee;
       setBusy('Получаем лучшую цену…');
-      const q = await getQuote(raw);
+      let q = await getQuote(raw, f);
       setBusy('Собираем транзакцию…');
-      const { tx, lastValidBlockHeight } = await jupSwapTransaction(q, owner.toBase58(), settings.priority);
-      setBusy('Подтвердите в кошельке…');
-      const sig = await wallet.sendTransaction(tx, connection, { maxRetries: 3 });
+      let built: Awaited<ReturnType<typeof jupSwapTransaction>>;
+      try {
+        built = await jupSwapTransaction(q, owner.toBase58(), settings.priority, f?.account);
+      } catch (e) {
+        if (!f) throw e;
+        // Сделка пользователя важнее комиссии: если Jupiter не принял счёт комиссии — без неё
+        console.warn('Jupiter отклонил комиссию, сделка без неё:', (e as Error).message);
+        f = undefined;
+        q = await getQuote(raw, undefined);
+        built = await jupSwapTransaction(q, owner.toBase58(), settings.priority);
+      }
+      const { tx, lastValidBlockHeight } = built;
+      setBusy(signer.kind === 'builtin' ? 'Отправляем…' : 'Подтвердите в кошельке…');
+      const sig = await signer.send(tx, connection);
       setBusy('Ждём подтверждения сети…');
       await waitForSignature(connection, sig, lastValidBlockHeight);
 
@@ -325,6 +355,12 @@ function SolanaTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; 
 
   const dec = decimals ?? tokBal?.decimals;
   const impact = quote ? priceImpactPercent(quote) : 0;
+  // Комиссия в SOL: при покупке — доля от входа, при продаже — от выхода (outAmount уже без комиссии)
+  const feeSol = !quote || !fee
+    ? undefined
+    : mode === 'buy'
+      ? (fromBaseUnits(quote.inAmount, 9) * fee.bps) / 10_000
+      : (fromBaseUnits(quote.outAmount, 9) * fee.bps) / (10_000 - fee.bps);
   const lowSol = mode === 'buy' && solBal !== undefined && parseFloat(amount) > solBal - 0.01;
 
   return (
@@ -357,6 +393,12 @@ function SolanaTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; 
               <div className="row-between small">
                 <span className="muted">Маршрут</span>
                 <span>{routeLabel(quote)}</span>
+              </div>
+            )}
+            {fee && (
+              <div className="row-between small">
+                <span className="muted">Комиссия сервиса {feePercentLabel(fee.bps)}</span>
+                <span>{feeSol !== undefined ? `≈ ${fmtAmount(feeSol)} SOL` : feePercentLabel(fee.bps)}</span>
               </div>
             )}
             {impact > 5 && <div className="text-bad small">Сделка сильно двигает цену — пул тонкий, уменьшите сумму.</div>}
@@ -422,13 +464,23 @@ function EvmTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; blo
     return (tokBal.raw * BigInt(sellPct)) / 100n;
   }, [mode, amount, tokBal, sellPct]);
 
+  // Комиссию всегда берём с нативной монеты: при покупке — со входа, при продаже — с выхода
+  const fee = evmFeeFor(token.chain);
   const getRoute = useCallback(
-    (raw: bigint) =>
-      mode === 'buy'
-        ? kyberRoute(token.chain, NATIVE, token.address, raw.toString())
-        : kyberRoute(token.chain, token.address, NATIVE, raw.toString()),
+    (raw: bigint) => {
+      const f = evmFeeFor(token.chain);
+      const kf = (by: KyberFee['chargeFeeBy']): KyberFee | undefined => (f ? { ...f, chargeFeeBy: by } : undefined);
+      return mode === 'buy'
+        ? kyberRoute(token.chain, NATIVE, token.address, raw.toString(), kf('currency_in'))
+        : kyberRoute(token.chain, token.address, NATIVE, raw.toString(), kf('currency_out'));
+    },
     [mode, token.chain, token.address],
   );
+
+  // Встроенный кошелёк переключает сеть сам, без вопросов
+  useEffect(() => {
+    if (evm.active?.uuid === 'builtin' && chain.evmChainId && evm.chainId !== chain.evmChainId) void evm.switchChain(chain.evmChainId);
+  }, [evm, chain.evmChainId]);
 
   useEffect(() => {
     setRoute(undefined);
@@ -463,19 +515,20 @@ function EvmTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; blo
       }
       const raw = amountIn();
       if (raw <= 0n) return;
+      const ops = evm.forChain(chain.evmChainId!);
       setBusy('Получаем лучшую цену…');
       const r = await getRoute(raw);
       if (mode === 'sell') {
         setBusy('Разрешите продажу токена (approve)…');
-        await evm.ensureAllowance(tokenAddr, r.routerAddress as Address, raw);
+        await ops.ensureAllowance(tokenAddr, r.routerAddress as Address, raw);
       }
       setBusy('Собираем транзакцию…');
       const built = await kyberBuild(token.chain, r, evm.account, slippage);
-      setBusy('Подтвердите в кошельке…');
+      setBusy(evm.active?.uuid === 'builtin' ? 'Отправляем…' : 'Подтвердите в кошельке…');
       const value = mode === 'buy' ? BigInt(built.transactionValue ?? built.amountIn) : 0n;
-      const hash = await evm.sendTransaction({ to: built.routerAddress as Address, data: built.data as Hex, value });
+      const hash = await ops.sendTransaction({ to: built.routerAddress as Address, data: built.data as Hex, value });
       setBusy('Ждём подтверждения сети…');
-      const status = await evm.waitForReceipt(hash);
+      const status = await ops.waitForReceipt(hash);
       if (status !== 'success') throw new Error('Транзакция отклонена сетью (чаще всего — цена ушла дальше slippage)');
 
       const dec = tokBal?.decimals ?? 18;
@@ -541,6 +594,12 @@ function EvmTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; blo
               <div className="row-between small">
                 <span className="muted">Потери на обмене</span>
                 <span className={loss > 5 ? 'text-bad' : loss > 2 ? 'text-warn' : ''}>{loss.toFixed(2)}%</span>
+              </div>
+            )}
+            {fee && (
+              <div className="row-between small">
+                <span className="muted">Комиссия сервиса {feePercentLabel(fee.bps)}</span>
+                <span>{inUsd ? `≈ $${((inUsd * fee.bps) / 10_000).toFixed(2)}` : feePercentLabel(fee.bps)}</span>
               </div>
             )}
             {route.routeSummary.gasUsd && (

@@ -1,7 +1,8 @@
 // Состояние интерфейса, которое не нужно сохранять (окно подключения кошелька, уведомления).
 import { useSyncExternalStore } from 'react';
+import { haptic } from './telegram';
 
-function memory<T>(initial: T) {
+export function memory<T>(initial: T) {
   let value = initial;
   const ls = new Set<() => void>();
   return {
@@ -30,6 +31,7 @@ export const toasts = memory<Toast[]>([]);
 
 export function toast(kind: Toast['kind'], text: string, link?: Toast['link']) {
   const t: Toast = { id: Date.now() + Math.random(), kind, text, link };
+  if (kind !== 'info') haptic(kind === 'ok' ? 'success' : 'error');
   toasts.set([...toasts.get(), t]);
   setTimeout(() => toasts.set(toasts.get().filter((x) => x.id !== t.id)), kind === 'error' ? 9000 : 6000);
 }

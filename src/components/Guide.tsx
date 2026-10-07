@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { toolLinks } from '../lib/chains';
 import { settingsStore, useStore } from '../lib/storage';
 import { fmtUsd } from '../lib/format';
+import { feeConfigured, feePercentLabel } from '../lib/fees';
 
 export function Guide() {
   const [settings] = useStore(settingsStore);
@@ -87,6 +88,15 @@ export function Guide() {
           <li>Фильтруй ботов и рекламные пуши — они часто путают.</li>
           <li>Фиксируй тогда, когда другие начинают покупать.</li>
         </ul>
+      </section>
+
+      <section className="card">
+        <h2>Комиссия сервиса</h2>
+        <p className="small">
+          {feeConfigured().solana || feeConfigured().evm
+            ? `С каждой сделки через приложение берётся ${feePercentLabel()} — она уже учтена в сумме «Вы получите» и видна до подтверждения. Комиссии сети и DEX — отдельно, как в любом кошельке.`
+            : 'Комиссия сервиса сейчас не взимается. Вы платите только комиссии сети и DEX.'}
+        </p>
       </section>
 
       <section className="card risk">

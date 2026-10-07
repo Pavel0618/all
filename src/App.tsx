@@ -6,7 +6,9 @@ import { Portfolio } from './components/Portfolio';
 import { Guide } from './components/Guide';
 import { Settings } from './components/Settings';
 import { ConnectModal, WalletButton } from './wallet/WalletButton';
-import { toasts, useMemory } from './lib/ui';
+import { connectModal, toasts, useMemory } from './lib/ui';
+import { useEffect } from 'react';
+import { setBackButton } from './lib/telegram';
 
 const NAV: { route: Route['name']; href: string; label: string; icon: string }[] = [
   { route: 'radar', href: '#/', label: 'Радар', icon: '📡' },
@@ -18,6 +20,11 @@ const NAV: { route: Route['name']; href: string; label: string; icon: string }[]
 export function App() {
   const hash = useHash();
   const route = parseHash(hash);
+
+  // Нативная кнопка «Назад» в Telegram на всех экранах, кроме главного
+  useEffect(() => setBackButton(route.name !== 'radar'), [route.name]);
+  // При переходе на другой экран окно кошелька закрываем
+  useEffect(() => connectModal.set(false), [hash]);
 
   return (
     <div className="app">

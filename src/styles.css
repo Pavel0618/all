@@ -1224,3 +1224,98 @@ a.pos:hover {
     transform: translateY(8px);
   }
 }
+
+/* ---------- Telegram Mini App и встроенный кошелёк ---------- */
+
+.text-ok {
+  color: var(--ok);
+}
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.head-actions .icon-btn {
+  font-size: 22px;
+}
+.alert-warn {
+  border-color: rgba(255, 200, 87, 0.5);
+  background: rgba(255, 200, 87, 0.08);
+}
+.owner-box {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  background: var(--bg2);
+}
+.bw {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.bw p {
+  margin: 0;
+}
+.bw-acc {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+}
+.bw-actions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+.key-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+}
+.key-value {
+  font-size: 12px;
+  word-break: break-all;
+  user-select: all;
+  color: var(--warn);
+}
+.key-input {
+  width: 100%;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 12px;
+  padding: 11px 14px;
+  font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  resize: vertical;
+  outline: none;
+}
+.key-input:focus {
+  border-color: var(--accent);
+}
+.btn-danger-text {
+  color: var(--bad);
+  border-color: transparent;
+}
+.bw .amount {
+  gap: 6px;
+}
+
+/* Внутри Telegram: свой заголовок у Telegram уже есть — экономим место */
+.in-telegram .topbar {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+.in-telegram .logo span {
+  font-size: 16px;
+}
+.in-telegram body {
+  overscroll-behavior: none;
+}

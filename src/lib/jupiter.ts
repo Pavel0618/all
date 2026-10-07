@@ -19,9 +19,18 @@ export interface JupQuote {
   slippageBps: number;
   priceImpactPct: string;
   routePlan: { swapInfo?: { label?: string } }[];
+  /** Комиссия платформы (если передан platformFeeBps): amount — в минимальных единицах минта комиссии */
+  platformFee?: { amount?: string; feeBps?: number } | null;
 }
 
-export async function jupQuote(params: { inputMint: string; outputMint: string; amount: string; slippageBps: number }): Promise<JupQuote> {
+export async function jupQuote(params: {
+  inputMint: string;
+  outputMint: string;
+  amount: string;
+  slippageBps: number;
+  /** Комиссия сервиса в bps; тогда в jupSwapTransaction обязательно передать feeAccount */
+  platformFeeBps?: number;
+}): Promise<JupQuote> {
   const q = new URLSearchParams({
     inputMint: params.inputMint,
     outputMint: params.outputMint,
@@ -29,6 +38,7 @@ export async function jupQuote(params: { inputMint: string; outputMint: string; 
     slippageBps: String(params.slippageBps),
     restrictIntermediateTokens: 'true',
   });
+  if (params.platformFeeBps) q.set('platformFeeBps', String(params.platformFeeBps));
   // Котировка живёт недолго — не кэшируем
   return getJson<JupQuote>(`${JUP}/quote?${q}`, { ttlMs: 0 });
 }
@@ -44,6 +54,8 @@ export async function jupSwapTransaction(
   quote: JupQuote,
   userPublicKey: string,
   priority: PriorityLevel,
+  /** Токен-счёт для комиссии сервиса (минт = вход или выход сделки) */
+  feeAccount?: string,
 ): Promise<{ tx: VersionedTransaction; lastValidBlockHeight: number }> {
   const res = await postJson<{ swapTransaction: string; lastValidBlockHeight: number }>(`${JUP}/swap`, {
     quoteResponse: quote,
@@ -53,6 +65,7 @@ export async function jupSwapTransaction(
     prioritizationFeeLamports: {
       priorityLevelWithMaxLamports: { maxLamports: MAX_PRIORITY_LAMPORTS[priority], priorityLevel: priority },
     },
+    ...(feeAccount ? { feeAccount } : {}),
   });
   return {
     tx: VersionedTransaction.deserialize(Buffer.from(res.swapTransaction, 'base64')),
