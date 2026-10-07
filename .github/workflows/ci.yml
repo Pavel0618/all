@@ -2,11 +2,17 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -16,8 +22,11 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
-      - run: npx playwright install --with-deps chromium
+      # Только headless-сборка Chromium: меньше скачивать; таймаут — чтобы зависшая загрузка не висела часами
+      - run: npx playwright install --with-deps --only-shell chromium
+        timeout-minutes: 8
       - run: npm run e2e
+        timeout-minutes: 8
       - uses: actions/upload-artifact@v4
         if: always()
         with:
