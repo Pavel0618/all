@@ -8,12 +8,15 @@
 const DEFAULT_FEE_BPS = 50;
 
 /** Ваш Solana-адрес (как в Phantom). Комиссия со сделок на Solana приходит в SOL. */
-const DEFAULT_FEE_SOLANA_WALLET = '';
+const DEFAULT_FEE_SOLANA_WALLET = 'GppeiwUj7jewiRqNmcH3YBMow9a3jCTLFf1dcY6F1bZx';
 
 /** Ваш EVM-адрес (0x…, как в MetaMask). Комиссия в Ethereum/Base/BNB/Arbitrum приходит в ETH/BNB. */
-const DEFAULT_FEE_EVM_WALLET = '';
+const DEFAULT_FEE_EVM_WALLET = '0xa82B263D0F2906aCf03A768F764Fe19cc7f9d534';
 
-/** Username Telegram-бота без @ и короткое имя Mini App (из @BotFather → /newapp) — для ссылок «Поделиться». */
+/**
+ * Username Telegram-бота без @ и короткое имя Mini App (из @BotFather → /newapp) — для ссылок «Поделиться».
+ * Если короткого имени нет (Mini App подключён как основной), ссылки будут вида t.me/<бот>?startapp=…
+ */
 const DEFAULT_TG_BOT = '';
 const DEFAULT_TG_APP = '';
 

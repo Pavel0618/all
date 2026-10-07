@@ -163,10 +163,11 @@ export function startParamToRoute(param?: string): string | undefined {
 }
 
 export function miniAppLink(route?: Extract<Route, { name: 'token' }>): string | undefined {
-  if (!TG_BOT || !TG_APP) return undefined;
-  const base = `https://t.me/${TG_BOT}/${TG_APP}`;
+  if (!TG_BOT) return undefined;
+  // С коротким именем — t.me/<бот>/<app>; без него — основной Mini App бота: t.me/<бот>?startapp
+  const base = TG_APP ? `https://t.me/${TG_BOT}/${TG_APP}` : `https://t.me/${TG_BOT}`;
   const p = route ? routeToStartParam(route.chain, route.address) : undefined;
-  return p ? `${base}?startapp=${p}` : base;
+  return p ? `${base}?startapp=${p}` : TG_APP ? base : `${base}?startapp`;
 }
 
 /** Поделиться токеном: в Telegram — выбор чата, в браузере — системное меню или копирование. */
