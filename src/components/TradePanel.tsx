@@ -1,0 +1,573 @@
+// Покупка и продажа прямо со страницы токена. Ключи остаются в кошельке пользователя:
+// приложение только собирает транзакцию через агрегатор и отдаёт её кошельку на подпись.
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useConnection, useWallet } from '@solana/wallet-adapter-react';
+import { LAMPORTS_PER_SOL, PublicKey, type ParsedAccountData } from '@solana/web3.js';
+import type { Address, Hex } from 'viem';
+import { CHAINS, toolLinks, type ChainId } from '../lib/chains';
+import { jupQuote, jupSwapTransaction, priceImpactPercent, routeLabel, SOL_MINT, waitForSignature, type JupQuote } from '../lib/jupiter';
+import { kyberBuild, kyberRoute, NATIVE, type KyberRoute } from '../lib/kyber';
+import { addTrade, settingsStore, useStore } from '../lib/storage';
+import { connectModal, toast } from '../lib/ui';
+import { fmtAmount, fmtUsd, fromBaseUnits, toBaseUnits } from '../lib/format';
+import type { VerdictLevel } from '../lib/analysis';
+import { useEvm } from '../wallet/evm';
+
+export interface TradeToken {
+  chain: ChainId;
+  address: string;
+  symbol: string;
+  name: string;
+  image?: string;
+  priceUsd?: number;
+  priceNative?: number;
+}
+
+type Mode = 'buy' | 'sell';
+
+const SLIPPAGES = [100, 300, 500, 1000, 2000];
+const SELL_PCTS = [25, 50, 100];
+
+function humanError(e: unknown): string {
+  const msg = (e as Error)?.message ?? String(e);
+  if (/reject|denied|cancel|declined/i.test(msg)) return 'Операция отменена в кошельке';
+  if (/insufficient|not enough|0x1\b/i.test(msg)) return 'Недостаточно средств на кошельке (с учётом комиссии сети)';
+  if (/0x1771|slippage/i.test(msg)) return 'Цена ушла дальше допустимого проскальзывания — увеличьте slippage или попробуйте ещё раз';
+  return msg.length > 220 ? `${msg.slice(0, 220)}…` : msg;
+}
+
+export function TradePanel({ token, verdict }: { token: TradeToken; verdict: VerdictLevel }) {
+  const [mode, setMode] = useState<Mode>('buy');
+  const [riskOk, setRiskOk] = useState(false);
+  const risky = verdict === 'skip' || verdict === 'danger';
+  const isSolana = CHAINS[token.chain].kind === 'solana';
+
+  return (
+    <section className="card trade" id="trade">
+      <div className="seg seg-wide">
+        <button className={mode === 'buy' ? 'seg-active seg-buy' : ''} onClick={() => setMode('buy')}>
+          Купить
+        </button>
+        <button className={mode === 'sell' ? 'seg-active seg-sell' : ''} onClick={() => setMode('sell')}>
+          Продать
+        </button>
+      </div>
+
+      {mode === 'buy' && risky && (
+        <label className={`risk-gate ${verdict === 'danger' ? 'risk-danger' : ''}`}>
+          <input type="checkbox" checked={riskOk} onChange={(e) => setRiskOk(e.target.checked)} />
+          <span>
+            {verdict === 'danger'
+              ? 'Контракт опасен. Я понимаю, что могу потерять всё, и всё равно хочу купить.'
+              : 'Методика советует пропустить эту монету. Я понимаю риск и покупаю на свою ответственность.'}
+          </span>
+        </label>
+      )}
+
+      {isSolana ? (
+        <SolanaTrade token={token} mode={mode} blocked={mode === 'buy' && risky && !riskOk} />
+      ) : (
+        <EvmTrade token={token} mode={mode} blocked={mode === 'buy' && risky && !riskOk} />
+      )}
+
+      <div className="tp-hint small">
+        💡 <b>Фиксация:</b> «фикси тогда, когда другие начинают покупать». Простое правило: на ×2 продайте 50% — вернёте вложенное, остальное
+        пусть летит. Монета ушла в боковик на хаях с пустым стаканом — выходите.
+      </div>
+      <div className="muted small center">
+        Не работает встроенный обмен?{' '}
+        <a href={toolLinks.externalSwap(token.chain, token.address)} target="_blank" rel="noreferrer">
+          Открыть {isSolana ? 'Jupiter' : token.chain === 'bsc' ? 'PancakeSwap' : 'Uniswap'} ↗
+        </a>
+      </div>
+    </section>
+  );
+}
+
+// ---------------- Общие элементы ----------------
+
+function SlippagePicker({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  return (
+    <div className="field">
+      <div className="field-label">
+        Проскальзывание (slippage)
+        <span className="muted small"> — для мемкоинов 3–10%</span>
+      </div>
+      <div className="chips">
+        {SLIPPAGES.map((s) => (
+          <button key={s} className={`chip ${value === s ? 'chip-active' : ''}`} onClick={() => onChange(s)}>
+            {s / 100}%
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AmountInput(props: { value: string; onChange: (v: string) => void; symbol: string; presets: number[]; balance?: number }) {
+  return (
+    <div className="field">
+      <div className="field-label row-between">
+        <span>Сумма покупки</span>
+        {props.balance !== undefined && (
+          <span className="muted small">
+            Баланс: {fmtAmount(props.balance)} {props.symbol}
+          </span>
+        )}
+      </div>
+      <div className="amount">
+        <input inputMode="decimal" value={props.value} onChange={(e) => props.onChange(e.target.value.replace(',', '.'))} aria-label="Сумма" />
+        <span className="amount-sym">{props.symbol}</span>
+      </div>
+      <div className="chips">
+        {props.presets.map((p) => (
+          <button key={p} className={`chip ${props.value === String(p) ? 'chip-active' : ''}`} onClick={() => props.onChange(String(p))}>
+            {p}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SellPicker(props: { pct: number; onChange: (p: number) => void; balance?: number; symbol: string }) {
+  return (
+    <div className="field">
+      <div className="field-label row-between">
+        <span>Сколько продать</span>
+        <span className="muted small">
+          У вас: {props.balance === undefined ? '—' : `${fmtAmount(props.balance)} ${props.symbol}`}
+        </span>
+      </div>
+      <div className="chips">
+        {SELL_PCTS.map((p) => (
+          <button key={p} className={`chip ${props.pct === p ? 'chip-active' : ''}`} onClick={() => props.onChange(p)}>
+            {p === 100 ? 'Всё' : `${p}%`}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function QuoteBox({ children, error, loading }: { children?: ReactNode; error?: string; loading?: boolean }) {
+  if (error) return <div className="quote quote-error">{error}</div>;
+  if (loading) return <div className="quote muted">Считаем лучшую цену…</div>;
+  if (!children) return null;
+  return <div className="quote">{children}</div>;
+}
+
+function ActionButton(props: { mode: Mode; busy?: string; disabled?: boolean; onClick: () => void; connected: boolean; label: string }) {
+  if (!props.connected) {
+    return (
+      <button className="btn btn-primary btn-block btn-big" onClick={() => connectModal.set(true)}>
+        Подключить кошелёк
+      </button>
+    );
+  }
+  return (
+    <button
+      className={`btn btn-block btn-big ${props.mode === 'buy' ? 'btn-buy' : 'btn-sell'}`}
+      disabled={props.disabled || Boolean(props.busy)}
+      onClick={props.onClick}
+    >
+      {props.busy ?? props.label}
+    </button>
+  );
+}
+
+// ---------------- Solana (Jupiter) ----------------
+
+function SolanaTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; blocked: boolean }) {
+  const { connection } = useConnection();
+  const wallet = useWallet();
+  const [settings, setSettings] = useStore(settingsStore);
+  const [amount, setAmount] = useState(String(settings.defaultBuy.solana ?? 0.1));
+  const [sellPct, setSellPct] = useState(100);
+  const [slippage, setSlippage] = useState(settings.slippageBps);
+  const [quote, setQuote] = useState<JupQuote>();
+  const [quoteErr, setQuoteErr] = useState<string>();
+  const [quoting, setQuoting] = useState(false);
+  const [decimals, setDecimals] = useState<number>();
+  const [solBal, setSolBal] = useState<number>();
+  const [tokBal, setTokBal] = useState<{ raw: bigint; decimals: number }>();
+  const [busy, setBusy] = useState<string>();
+  const mint = token.address;
+  const owner = wallet.publicKey;
+
+  useEffect(() => {
+    let key: PublicKey;
+    try {
+      key = new PublicKey(mint);
+    } catch {
+      return;
+    }
+    connection
+      .getParsedAccountInfo(key)
+      .then((info) => {
+        const d = (info.value?.data as ParsedAccountData | undefined)?.parsed?.info?.decimals;
+        if (typeof d === 'number') setDecimals(d);
+      })
+      .catch(() => undefined);
+  }, [connection, mint]);
+
+  const loadBalances = useCallback(async () => {
+    if (!owner) {
+      setSolBal(undefined);
+      setTokBal(undefined);
+      return;
+    }
+    try {
+      const [lamports, accs] = await Promise.all([
+        connection.getBalance(owner),
+        connection.getParsedTokenAccountsByOwner(owner, { mint: new PublicKey(mint) }),
+      ]);
+      setSolBal(lamports / LAMPORTS_PER_SOL);
+      let raw = 0n;
+      let dec = decimals ?? 6;
+      for (const a of accs.value) {
+        const info = (a.account.data as ParsedAccountData).parsed.info.tokenAmount;
+        raw += BigInt(info.amount);
+        dec = info.decimals;
+      }
+      setTokBal({ raw, decimals: dec });
+    } catch {
+      /* RPC недоступен — покажем без баланса */
+    }
+  }, [connection, owner, mint, decimals]);
+
+  useEffect(() => {
+    void loadBalances();
+  }, [loadBalances]);
+
+  const amountIn = useCallback((): bigint => {
+    if (mode === 'buy') return toBaseUnits(amount, 9);
+    if (!tokBal) return 0n;
+    return (tokBal.raw * BigInt(sellPct)) / 100n;
+  }, [mode, amount, tokBal, sellPct]);
+
+  const getQuote = useCallback(
+    (raw: bigint) =>
+      jupQuote({
+        inputMint: mode === 'buy' ? SOL_MINT : mint,
+        outputMint: mode === 'buy' ? mint : SOL_MINT,
+        amount: raw.toString(),
+        slippageBps: slippage,
+      }),
+    [mode, mint, slippage],
+  );
+
+  // Предварительная котировка
+  useEffect(() => {
+    setQuote(undefined);
+    setQuoteErr(undefined);
+    const raw = amountIn();
+    if (raw <= 0n) return;
+    setQuoting(true);
+    let cancelled = false;
+    const t = setTimeout(() => {
+      getQuote(raw)
+        .then((q) => !cancelled && setQuote(q))
+        .catch((e: Error) => !cancelled && setQuoteErr(`Нет маршрута: ${e.message}`))
+        .finally(() => !cancelled && setQuoting(false));
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [amountIn, getQuote]);
+
+  const execute = async () => {
+    if (!owner || !wallet.sendTransaction) {
+      connectModal.set(true);
+      return;
+    }
+    const raw = amountIn();
+    if (raw <= 0n) return;
+    try {
+      setBusy('Получаем лучшую цену…');
+      const q = await getQuote(raw);
+      setBusy('Собираем транзакцию…');
+      const { tx, lastValidBlockHeight } = await jupSwapTransaction(q, owner.toBase58(), settings.priority);
+      setBusy('Подтвердите в кошельке…');
+      const sig = await wallet.sendTransaction(tx, connection, { maxRetries: 3 });
+      setBusy('Ждём подтверждения сети…');
+      await waitForSignature(connection, sig, lastValidBlockHeight);
+
+      const dec = decimals ?? tokBal?.decimals ?? 6;
+      const sol = fromBaseUnits(mode === 'buy' ? q.inAmount : q.outAmount, 9);
+      const tokens = fromBaseUnits(mode === 'buy' ? q.outAmount : q.inAmount, dec);
+      addTrade({
+        side: mode,
+        chain: 'solana',
+        address: mint,
+        symbol: token.symbol,
+        name: token.name,
+        image: token.image,
+        nativeAmount: sol,
+        nativeSymbol: 'SOL',
+        tokenAmount: tokens,
+        priceUsd: token.priceUsd,
+        tx: sig,
+      });
+      if (mode === 'buy') setSettings((s) => ({ ...s, defaultBuy: { ...s.defaultBuy, solana: parseFloat(amount) } }));
+      toast('ok', mode === 'buy' ? `Куплено ≈ ${fmtAmount(tokens)} ${token.symbol}` : `Продано, получено ≈ ${fmtAmount(sol)} SOL`, {
+        href: toolLinks.explorerTx('solana', sig),
+        label: 'Solscan',
+      });
+    } catch (e) {
+      toast('error', humanError(e));
+    } finally {
+      setBusy(undefined);
+      void loadBalances();
+    }
+  };
+
+  const dec = decimals ?? tokBal?.decimals;
+  const impact = quote ? priceImpactPercent(quote) : 0;
+  const lowSol = mode === 'buy' && solBal !== undefined && parseFloat(amount) > solBal - 0.01;
+
+  return (
+    <>
+      {mode === 'buy' ? (
+        <AmountInput value={amount} onChange={setAmount} symbol="SOL" presets={CHAINS.solana.buyPresets} balance={solBal} />
+      ) : (
+        <SellPicker pct={sellPct} onChange={setSellPct} balance={tokBal && fromBaseUnits(tokBal.raw, tokBal.decimals)} symbol={token.symbol} />
+      )}
+      <SlippagePicker value={slippage} onChange={setSlippage} />
+
+      <QuoteBox error={quoteErr} loading={quoting && !quote}>
+        {quote && (
+          <>
+            <div className="row-between">
+              <span>Вы получите ≈</span>
+              <b>
+                {mode === 'buy'
+                  ? dec !== undefined
+                    ? `${fmtAmount(fromBaseUnits(quote.outAmount, dec))} ${token.symbol}`
+                    : '…'
+                  : `${fmtAmount(fromBaseUnits(quote.outAmount, 9))} SOL`}
+              </b>
+            </div>
+            <div className="row-between small">
+              <span className="muted">Влияние на цену</span>
+              <span className={impact > 5 ? 'text-bad' : impact > 2 ? 'text-warn' : ''}>{impact.toFixed(2)}%</span>
+            </div>
+            {routeLabel(quote) && (
+              <div className="row-between small">
+                <span className="muted">Маршрут</span>
+                <span>{routeLabel(quote)}</span>
+              </div>
+            )}
+            {impact > 5 && <div className="text-bad small">Сделка сильно двигает цену — пул тонкий, уменьшите сумму.</div>}
+          </>
+        )}
+      </QuoteBox>
+      {lowSol && <div className="text-warn small">Оставьте ~0.01 SOL на комиссии сети.</div>}
+      {mode === 'sell' && owner && tokBal?.raw === 0n && <div className="muted small">На подключённом кошельке нет этого токена.</div>}
+
+      <ActionButton
+        mode={mode}
+        busy={busy}
+        connected={Boolean(owner)}
+        disabled={blocked || !quote || (mode === 'sell' && !tokBal?.raw)}
+        onClick={execute}
+        label={mode === 'buy' ? `Купить ${token.symbol} за ${amount || 0} SOL` : `Продать ${sellPct}% ${token.symbol}`}
+      />
+      <div className="muted small center">Обмен через Jupiter · приоритетная комиссия: {settings.priority}</div>
+    </>
+  );
+}
+
+// ---------------- EVM (KyberSwap) ----------------
+
+function EvmTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; blocked: boolean }) {
+  const evm = useEvm();
+  const chain = CHAINS[token.chain];
+  const [settings, setSettings] = useStore(settingsStore);
+  const [amount, setAmount] = useState(String(settings.defaultBuy[token.chain] ?? chain.buyPresets[1]));
+  const [sellPct, setSellPct] = useState(100);
+  const [slippage, setSlippage] = useState(settings.slippageBps);
+  const [route, setRoute] = useState<KyberRoute>();
+  const [routeErr, setRouteErr] = useState<string>();
+  const [quoting, setQuoting] = useState(false);
+  const [tokBal, setTokBal] = useState<{ raw: bigint; decimals: number }>();
+  const [nativeBal, setNativeBal] = useState<number>();
+  const [busy, setBusy] = useState<string>();
+  const tokenAddr = token.address as Address;
+  const onChain = Boolean(evm.account) && evm.chainId === chain.evmChainId;
+
+  const loadBalances = useCallback(async () => {
+    if (!onChain) {
+      setTokBal(undefined);
+      setNativeBal(undefined);
+      return;
+    }
+    try {
+      const [t, n] = await Promise.all([evm.tokenBalance(tokenAddr), evm.nativeBalance()]);
+      setTokBal(t);
+      setNativeBal(fromBaseUnits(n, 18));
+    } catch {
+      /* ignore */
+    }
+  }, [onChain, evm, tokenAddr]);
+
+  useEffect(() => {
+    void loadBalances();
+  }, [loadBalances]);
+
+  const amountIn = useCallback((): bigint => {
+    if (mode === 'buy') return toBaseUnits(amount, 18);
+    if (!tokBal) return 0n;
+    return (tokBal.raw * BigInt(sellPct)) / 100n;
+  }, [mode, amount, tokBal, sellPct]);
+
+  const getRoute = useCallback(
+    (raw: bigint) =>
+      mode === 'buy'
+        ? kyberRoute(token.chain, NATIVE, token.address, raw.toString())
+        : kyberRoute(token.chain, token.address, NATIVE, raw.toString()),
+    [mode, token.chain, token.address],
+  );
+
+  useEffect(() => {
+    setRoute(undefined);
+    setRouteErr(undefined);
+    const raw = amountIn();
+    if (raw <= 0n) return;
+    setQuoting(true);
+    let cancelled = false;
+    const t = setTimeout(() => {
+      getRoute(raw)
+        .then((r) => !cancelled && setRoute(r))
+        .catch((e: Error) => !cancelled && setRouteErr(`Нет маршрута: ${e.message}`))
+        .finally(() => !cancelled && setQuoting(false));
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [amountIn, getRoute]);
+
+  const execute = async () => {
+    if (!evm.account) {
+      connectModal.set(true);
+      return;
+    }
+    try {
+      if (!onChain && chain.evmChainId) {
+        setBusy(`Переключаем сеть на ${chain.name}…`);
+        await evm.switchChain(chain.evmChainId);
+        setBusy(undefined);
+        return; // после переключения обновятся балансы и котировка
+      }
+      const raw = amountIn();
+      if (raw <= 0n) return;
+      setBusy('Получаем лучшую цену…');
+      const r = await getRoute(raw);
+      if (mode === 'sell') {
+        setBusy('Разрешите продажу токена (approve)…');
+        await evm.ensureAllowance(tokenAddr, r.routerAddress as Address, raw);
+      }
+      setBusy('Собираем транзакцию…');
+      const built = await kyberBuild(token.chain, r, evm.account, slippage);
+      setBusy('Подтвердите в кошельке…');
+      const value = mode === 'buy' ? BigInt(built.transactionValue ?? built.amountIn) : 0n;
+      const hash = await evm.sendTransaction({ to: built.routerAddress as Address, data: built.data as Hex, value });
+      setBusy('Ждём подтверждения сети…');
+      const status = await evm.waitForReceipt(hash);
+      if (status !== 'success') throw new Error('Транзакция отклонена сетью (чаще всего — цена ушла дальше slippage)');
+
+      const dec = tokBal?.decimals ?? 18;
+      const native = fromBaseUnits(mode === 'buy' ? built.amountIn : built.amountOut, 18);
+      const tokens = fromBaseUnits(mode === 'buy' ? built.amountOut : built.amountIn, dec);
+      addTrade({
+        side: mode,
+        chain: token.chain,
+        address: token.address,
+        symbol: token.symbol,
+        name: token.name,
+        image: token.image,
+        nativeAmount: native,
+        nativeSymbol: chain.native,
+        tokenAmount: tokens,
+        priceUsd: token.priceUsd,
+        tx: hash,
+      });
+      if (mode === 'buy') setSettings((s) => ({ ...s, defaultBuy: { ...s.defaultBuy, [token.chain]: parseFloat(amount) } }));
+      toast('ok', mode === 'buy' ? `Куплено ≈ ${fmtAmount(tokens)} ${token.symbol}` : `Продано, получено ≈ ${fmtAmount(native)} ${chain.native}`, {
+        href: toolLinks.explorerTx(token.chain, hash),
+        label: 'Обозреватель',
+      });
+    } catch (e) {
+      toast('error', humanError(e));
+    } finally {
+      setBusy(undefined);
+      void loadBalances();
+    }
+  };
+
+  const outUsd = route ? parseFloat(route.routeSummary.amountOutUsd) : undefined;
+  const inUsd = route ? parseFloat(route.routeSummary.amountInUsd) : undefined;
+  const loss = inUsd && outUsd ? ((inUsd - outUsd) / inUsd) * 100 : undefined;
+
+  return (
+    <>
+      {mode === 'buy' ? (
+        <AmountInput value={amount} onChange={setAmount} symbol={chain.native} presets={chain.buyPresets} balance={nativeBal} />
+      ) : (
+        <SellPicker pct={sellPct} onChange={setSellPct} balance={tokBal && fromBaseUnits(tokBal.raw, tokBal.decimals)} symbol={token.symbol} />
+      )}
+      <SlippagePicker value={slippage} onChange={setSlippage} />
+
+      {mode === 'sell' && !onChain && (
+        <div className="muted small">Подключите кошелёк в сети {chain.name}, чтобы увидеть баланс токена.</div>
+      )}
+
+      <QuoteBox error={routeErr} loading={quoting && !route}>
+        {route && (
+          <>
+            <div className="row-between">
+              <span>Вы получите ≈</span>
+              <b>
+                {mode === 'buy'
+                  ? tokBal
+                    ? `${fmtAmount(fromBaseUnits(route.routeSummary.amountOut, tokBal.decimals))} ${token.symbol}`
+                    : `${token.symbol} на ${fmtUsd(outUsd)}`
+                  : `${fmtAmount(fromBaseUnits(route.routeSummary.amountOut, 18))} ${chain.native}`}
+              </b>
+            </div>
+            {loss !== undefined && (
+              <div className="row-between small">
+                <span className="muted">Потери на обмене</span>
+                <span className={loss > 5 ? 'text-bad' : loss > 2 ? 'text-warn' : ''}>{loss.toFixed(2)}%</span>
+              </div>
+            )}
+            {route.routeSummary.gasUsd && (
+              <div className="row-between small">
+                <span className="muted">Комиссия сети</span>
+                <span>≈ ${parseFloat(route.routeSummary.gasUsd).toFixed(2)}</span>
+              </div>
+            )}
+          </>
+        )}
+      </QuoteBox>
+
+      <ActionButton
+        mode={mode}
+        busy={busy}
+        connected={Boolean(evm.account)}
+        disabled={blocked || (onChain && !route) || (mode === 'sell' && onChain && !tokBal?.raw)}
+        onClick={execute}
+        label={
+          !onChain
+            ? `Переключить сеть на ${chain.name}`
+            : mode === 'buy'
+              ? `Купить ${token.symbol} за ${amount || 0} ${chain.native}`
+              : `Продать ${sellPct}% ${token.symbol}`
+        }
+      />
+      <div className="muted small center">Обмен через KyberSwap · {chain.name}</div>
+    </>
+  );
+}
