@@ -573,7 +573,7 @@ const TG_INIT = ({ startParam }) => {
   await page.locator('.trade').getByRole('button', { name: 'Подключить кошелёк' }).click();
   await page.getByRole('button', { name: 'TestWallet' }).click();
   await page.waitForSelector('.wallet-btn .dot-ok', { timeout: 10000 });
-  await page.waitForSelector('.quote >> text=Вы получите', { timeout: 10000 });
+  await page.waitForSelector('.quote >> text=Комиссия сервиса', { timeout: 10000 });
   const quoteText = await page.locator('.quote').innerText();
   check('Покупка: котировка Jupiter с decimals', /476[\s,.]?190|476\.2k|476,190/.test(quoteText), quoteText.replace(/\n/g, ' | '));
   await page.locator('.trade .btn-buy').click();

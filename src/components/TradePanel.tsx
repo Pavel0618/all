@@ -1,6 +1,6 @@
 // Покупка и продажа прямо со страницы токена. Ключи остаются в кошельке пользователя:
 // приложение только собирает транзакцию через агрегатор и отдаёт её кошельку на подпись.
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useConnection } from '@solana/wallet-adapter-react';
 import { LAMPORTS_PER_SOL, PublicKey, type ParsedAccountData } from '@solana/web3.js';
 import type { Address, Hex } from 'viem';
@@ -190,6 +190,8 @@ function SolanaTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; 
   const [settings, setSettings] = useStore(settingsStore);
   const [amount, setAmount] = useState(String(settings.defaultBuy.solana ?? 0.1));
   const [fee, setFee] = useState<SolanaFee>();
+  // Пока не знаем, берётся ли комиссия, котировку не запрашиваем — иначе она мигнёт и перезапросится
+  const [feeChecked, setFeeChecked] = useState(false);
   const [sellPct, setSellPct] = useState(100);
   const [slippage, setSlippage] = useState(settings.slippageBps);
   const [quote, setQuote] = useState<JupQuote>();
@@ -205,7 +207,9 @@ function SolanaTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; 
   // Комиссия сервиса (если владелец указал адрес и счёт для комиссий готов)
   useEffect(() => {
     let cancelled = false;
-    solanaFeeFor(connection).then((f) => !cancelled && setFee(f));
+    solanaFeeFor(connection)
+      .then((f) => !cancelled && setFee(f))
+      .finally(() => !cancelled && setFeeChecked(true));
     return () => {
       cancelled = true;
     };
@@ -256,11 +260,11 @@ function SolanaTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; 
     void loadBalances();
   }, [loadBalances]);
 
-  const amountIn = useCallback((): bigint => {
-    if (mode === 'buy') return toBaseUnits(amount, 9);
-    if (!tokBal) return 0n;
-    return (tokBal.raw * BigInt(sellPct)) / 100n;
-  }, [mode, amount, tokBal, sellPct]);
+  // bigint сравнивается по значению: обновление баланса при покупке не вызывает лишний перезапрос котировки
+  const rawIn = useMemo(
+    () => (mode === 'buy' ? toBaseUnits(amount, 9) : tokBal ? (tokBal.raw * BigInt(sellPct)) / 100n : 0n),
+    [mode, amount, tokBal, sellPct],
+  );
 
   const getQuote = useCallback(
     (raw: bigint, f: SolanaFee | undefined) =>
@@ -278,8 +282,8 @@ function SolanaTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; 
   useEffect(() => {
     setQuote(undefined);
     setQuoteErr(undefined);
-    const raw = amountIn();
-    if (raw <= 0n) return;
+    const raw = rawIn;
+    if (raw <= 0n || !feeChecked) return;
     setQuoting(true);
     let cancelled = false;
     const t = setTimeout(() => {
@@ -292,14 +296,14 @@ function SolanaTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; 
       cancelled = true;
       clearTimeout(t);
     };
-  }, [amountIn, getQuote, fee]);
+  }, [rawIn, getQuote, fee, feeChecked]);
 
   const execute = async () => {
     if (!owner) {
       connectModal.set(true);
       return;
     }
-    const raw = amountIn();
+    const raw = rawIn;
     if (raw <= 0n) return;
     try {
       // Одна и та же комиссия должна быть и в котировке, и в транзакции
@@ -458,11 +462,10 @@ function EvmTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; blo
     void loadBalances();
   }, [loadBalances]);
 
-  const amountIn = useCallback((): bigint => {
-    if (mode === 'buy') return toBaseUnits(amount, 18);
-    if (!tokBal) return 0n;
-    return (tokBal.raw * BigInt(sellPct)) / 100n;
-  }, [mode, amount, tokBal, sellPct]);
+  const rawIn = useMemo(
+    () => (mode === 'buy' ? toBaseUnits(amount, 18) : tokBal ? (tokBal.raw * BigInt(sellPct)) / 100n : 0n),
+    [mode, amount, tokBal, sellPct],
+  );
 
   // Комиссию всегда берём с нативной монеты: при покупке — со входа, при продаже — с выхода
   const fee = evmFeeFor(token.chain);
@@ -485,7 +488,7 @@ function EvmTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; blo
   useEffect(() => {
     setRoute(undefined);
     setRouteErr(undefined);
-    const raw = amountIn();
+    const raw = rawIn;
     if (raw <= 0n) return;
     setQuoting(true);
     let cancelled = false;
@@ -499,7 +502,7 @@ function EvmTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; blo
       cancelled = true;
       clearTimeout(t);
     };
-  }, [amountIn, getRoute]);
+  }, [rawIn, getRoute]);
 
   const execute = async () => {
     if (!evm.account) {
@@ -513,7 +516,7 @@ function EvmTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; blo
         setBusy(undefined);
         return; // после переключения обновятся балансы и котировка
       }
-      const raw = amountIn();
+      const raw = rawIn;
       if (raw <= 0n) return;
       const ops = evm.forChain(chain.evmChainId!);
       setBusy('Получаем лучшую цену…');
