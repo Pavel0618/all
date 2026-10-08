@@ -6,10 +6,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && tsc -p worker --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p worker --noEmit",
     "e2e": "node e2e/smoke.cjs"
   },
   "dependencies": {
@@ -23,12 +23,14 @@
     "viem": "^2.57.3"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261008.1",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
     "playwright": "^1.63.0",
     "typescript": "^5.9.3",
     "vite": "^8.3.3",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.3",
+    "wrangler": "^4.148.0"
   }
 }

@@ -6,3 +6,4 @@ dist
 .env.local
 e2e/screenshots
 e2e/dist
+.wrangler

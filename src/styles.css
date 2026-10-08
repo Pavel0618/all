@@ -1319,3 +1319,32 @@ a.pos:hover {
 .in-telegram body {
   overscroll-behavior: none;
 }
+
+/* ---------- Автоматический Twitter-анализ ---------- */
+
+.tw-note {
+  margin: 8px 0 4px;
+  font-size: 13px;
+  color: var(--info);
+}
+.tw-warn {
+  color: var(--warn);
+}
+.kols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 2px;
+}
+.kol {
+  font-size: 13px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg2);
+  color: var(--text);
+}
+.kol:hover {
+  border-color: var(--accent);
+  text-decoration: none;
+}

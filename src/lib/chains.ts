@@ -1,6 +1,6 @@
 // Поддерживаемые сети и ссылки на внешние инструменты из методики.
 
-export type ChainId = 'solana' | 'ethereum' | 'base' | 'bsc' | 'arbitrum';
+export type ChainId = 'solana' | 'ethereum' | 'base' | 'bsc' | 'arbitrum' | 'robinhood';
 
 export interface ChainInfo {
   id: ChainId;
@@ -15,8 +15,12 @@ export interface ChainInfo {
   goplusId?: string;
   /** Имя сети в KyberSwap Aggregator */
   kyberSlug?: string;
-  /** Имя сети в GeckoTerminal */
+  /** Имя сети в GeckoTerminal (если не подойдёт — ищем по названию в списке сетей) */
   geckoSlug: string;
+  /** Публичный API обозревателя Blockscout — для своей проверки контракта, когда GoPlus молчит */
+  blockscoutApi?: string;
+  /** Публичный RPC (EVM) */
+  rpc?: string;
   /** Имя сети в GMGN (если поддерживается) */
   gmgnSlug?: string;
   /** Имя сети в TokenSniffer */
@@ -48,6 +52,8 @@ export const CHAINS: Record<ChainId, ChainInfo> = {
     geckoSlug: 'eth',
     gmgnSlug: 'eth',
     snifferSlug: 'eth',
+    blockscoutApi: 'https://eth.blockscout.com/api/v2',
+    rpc: 'https://ethereum-rpc.publicnode.com',
     explorer: 'https://etherscan.io',
     buyPresets: [0.01, 0.02, 0.05, 0.1, 0.25],
   },
@@ -62,6 +68,8 @@ export const CHAINS: Record<ChainId, ChainInfo> = {
     geckoSlug: 'base',
     gmgnSlug: 'base',
     snifferSlug: 'base',
+    blockscoutApi: 'https://base.blockscout.com/api/v2',
+    rpc: 'https://base-rpc.publicnode.com',
     explorer: 'https://basescan.org',
     buyPresets: [0.005, 0.01, 0.025, 0.05, 0.1],
   },
@@ -76,6 +84,7 @@ export const CHAINS: Record<ChainId, ChainInfo> = {
     geckoSlug: 'bsc',
     gmgnSlug: 'bsc',
     snifferSlug: 'bsc',
+    rpc: 'https://bsc-rpc.publicnode.com',
     explorer: 'https://bscscan.com',
     buyPresets: [0.02, 0.05, 0.1, 0.25, 0.5],
   },
@@ -89,7 +98,24 @@ export const CHAINS: Record<ChainId, ChainInfo> = {
     kyberSlug: 'arbitrum',
     geckoSlug: 'arbitrum',
     snifferSlug: 'arbitrum',
+    blockscoutApi: 'https://arbitrum.blockscout.com/api/v2',
+    rpc: 'https://arbitrum-one-rpc.publicnode.com',
     explorer: 'https://arbiscan.io',
+    buyPresets: [0.005, 0.01, 0.025, 0.05, 0.1],
+  },
+  // Robinhood Chain — L2 на Arbitrum Orbit (запущена 1 июля 2026), газ в ETH
+  robinhood: {
+    id: 'robinhood',
+    name: 'Robinhood',
+    kind: 'evm',
+    native: 'ETH',
+    evmChainId: 4663,
+    goplusId: '4663',
+    kyberSlug: 'robinhood',
+    geckoSlug: 'robinhood',
+    blockscoutApi: 'https://robinhoodchain.blockscout.com/api/v2',
+    rpc: 'https://rpc.mainnet.chain.robinhood.com',
+    explorer: 'https://robinhoodchain.blockscout.com',
     buyPresets: [0.005, 0.01, 0.025, 0.05, 0.1],
   },
 };
@@ -97,7 +123,7 @@ export const CHAINS: Record<ChainId, ChainInfo> = {
 export const CHAIN_LIST: ChainInfo[] = Object.values(CHAINS);
 
 export function isChainId(v: string): v is ChainId {
-  return v in CHAINS;
+  return Object.prototype.hasOwnProperty.call(CHAINS, v);
 }
 
 export function chainByEvmId(id: number): ChainInfo | undefined {
@@ -180,6 +206,7 @@ function guessChainFromPath(host: string, parts: string[]): ChainId | undefined 
     base: 'base',
     bsc: 'bsc',
     arbitrum: 'arbitrum',
+    robinhood: 'robinhood',
   };
   return map[first];
 }
@@ -228,14 +255,3 @@ export const toolLinks = {
     }
   },
 };
-
-/** Открыть текущую страницу во встроенном браузере Phantom (для телефона). */
-export function phantomBrowseLink(): string {
-  const url = encodeURIComponent(window.location.href);
-  return `https://phantom.app/ul/browse/${url}?ref=${url}`;
-}
-
-/** Открыть текущую страницу во встроенном браузере MetaMask (для телефона). */
-export function metamaskBrowseLink(): string {
-  return `https://metamask.app.link/dapp/${window.location.host}${window.location.pathname}${window.location.hash}`;
-}

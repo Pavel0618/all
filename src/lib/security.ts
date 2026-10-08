@@ -3,6 +3,7 @@
 // Всё приводим к одному виду: 4 группы из инструкции + honeypot и держатели.
 import { getJson } from './http';
 import { CHAINS, type ChainId } from './chains';
+import { checkWithBlockscout } from './blockscout';
 
 export type Severity = 'danger' | 'warn' | 'ok';
 
@@ -25,7 +26,7 @@ export interface SecurityFlag {
   group: SecurityGroup;
   severity: Severity;
   text: string;
-  source: 'GoPlus' | 'RugCheck' | 'DexScreener';
+  source: 'GoPlus' | 'RugCheck' | 'DexScreener' | 'Blockscout';
 }
 
 export interface SecurityReport {
@@ -282,18 +283,35 @@ export async function checkSecurity(chain: ChainId, address: string, dexId?: str
   report.bondingCurve = bondingCurve;
 
   if (CHAINS[chain].kind === 'evm') {
+    let goplusOk = false;
     try {
       const g = await fetchGoPlusEvm(chain, address);
-      if (g) {
+      // Для незнакомых GoPlus токенов/сетей приходит пустой объект — это не «чисто», а «нет данных»
+      if (g && (g.is_open_source === '0' || g.is_open_source === '1' || g.buy_tax !== undefined)) {
         const { flags, lpLockedPct } = evmFlags(g);
         report.flags.push(...flags);
         report.lpLockedPct = lpLockedPct;
         report.sources.push('GoPlus');
+        goplusOk = true;
       } else {
-        report.errors.push('GoPlus: токен ещё не проиндексирован');
+        report.errors.push('GoPlus: нет данных по токену');
       }
     } catch (e) {
       report.errors.push(`GoPlus: ${(e as Error).message}`);
+    }
+    // Нет данных в GoPlus (свежий токен или сеть вроде Robinhood) — проверяем контракт сами
+    if (!goplusOk && CHAINS[chain].blockscoutApi) {
+      try {
+        const bs = await checkWithBlockscout(chain, address);
+        if (bs) {
+          report.flags.push(...bs.flags);
+          report.sources.push('Blockscout');
+        } else {
+          report.errors.push('Blockscout: контракт не найден');
+        }
+      } catch (e) {
+        report.errors.push(`Blockscout: ${(e as Error).message}`);
+      }
     }
   } else {
     const [rug, gp] = await Promise.allSettled([fetchRugCheck(address), fetchGoPlusSolana(address)]);
@@ -323,11 +341,13 @@ export async function checkSecurity(chain: ChainId, address: string, dexId?: str
     });
   }
 
-  // Если источник ответил, но ничего плохого по группе не нашёл — считаем группу чистой
-  if (report.sources.length) {
+  // Если полноценный источник (GoPlus / RugCheck) ответил, но ничего плохого по группе не нашёл — группа чистая.
+  // Своя проверка по Blockscout сама отмечает, что проверила, а что нет.
+  const full = report.sources.find((src) => src === 'GoPlus' || src === 'RugCheck') as 'GoPlus' | 'RugCheck' | undefined;
+  if (full) {
     for (const group of ['permissions', 'tax', 'owner', 'honeypot'] as SecurityGroup[]) {
       if (!report.flags.some((f) => f.group === group)) {
-        report.flags.push({ group, severity: 'ok', text: 'Проблем не найдено', source: report.sources[0] as 'GoPlus' | 'RugCheck' });
+        report.flags.push({ group, severity: 'ok', text: 'Проблем не найдено', source: full });
       }
     }
   }
