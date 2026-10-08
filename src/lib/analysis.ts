@@ -8,6 +8,7 @@
 import type { DexPair } from './dexscreener';
 import { CORE_GROUPS, groupStatus, type SecurityReport } from './security';
 import { matchNarratives, type Narrative } from './narratives';
+import { hypeFromSignals, influencersFromSignals, type TwitterSignals } from './twitterSignals';
 
 export type CriterionId = 'hype' | 'influencers' | 'price' | 'contract' | 'narrative';
 export type CriterionStatus = 'good' | 'weak' | 'unknown';
@@ -132,6 +133,8 @@ export interface AnalysisInput {
   narratives: Narrative[];
   answers: ManualAnswers;
   thresholds: Thresholds;
+  /** Автоматическая Twitter-аналитика с сервера (если подключена) */
+  signals?: TwitterSignals;
 }
 
 export function hypeCriterion(i: AnalysisInput): Criterion {
@@ -149,6 +152,12 @@ export function hypeCriterion(i: AnalysisInput): Criterion {
       text: i.answers.hype === 'yes' ? 'Вы подтвердили: упоминаний в Twitter резко больше' : 'Вы отметили: всплеска в Twitter нет',
     });
     return { id: 'hype', title: 'Хайп в Twitter нарастает', status: i.answers.hype === 'yes' ? 'good' : 'weak', auto: false, reasons };
+  }
+
+  // Есть данные из Twitter — решаем по ним, активность в пуле остаётся пояснением
+  if (i.signals) {
+    const v = hypeFromSignals(i.signals);
+    return { id: 'hype', title: 'Хайп в Twitter нарастает', status: v.status, auto: true, reasons: [...v.reasons, ...reasons] };
   }
 
   let status: CriterionStatus = 'unknown';
@@ -178,6 +187,10 @@ export function influencersCriterion(i: AnalysisInput): Criterion {
       auto: false,
       reasons,
     };
+  }
+  if (i.signals) {
+    const v = influencersFromSignals(i.signals);
+    return { id: 'influencers', title: 'Его качают реальные инфлюенсеры', status: v.status, auto: true, reasons: [...v.reasons, ...reasons] };
   }
   if (!i.hasTwitterLink) {
     reasons.push({ ok: false, text: 'Нет Twitter — проверить, кто раскачивает, невозможно' });
@@ -292,18 +305,22 @@ export function contractCriterion(i: AnalysisInput): Criterion & { critical: boo
   }
   if (groupStatus(r, 'holders') === 'danger' || groupStatus(r, 'other') === 'danger') weak = true;
 
+  // Опасное — крестиком, «не проверено / обратите внимание» — нейтрально
   for (const f of r.flags) {
     if (f.severity === 'ok') continue;
-    reasons.push({ ok: false, text: f.text });
+    reasons.push({ ok: f.severity === 'danger' ? false : null, text: f.text });
   }
-  if (!reasons.length) reasons.push({ ok: true, text: `Опасных функций не найдено (${r.sources.join(' + ')})` });
+  if (!reasons.some((x) => x.ok === false)) reasons.unshift({ ok: true, text: `Опасных функций не найдено (${r.sources.join(' + ')})` });
 
   return { ...base, status: critical || weak ? 'weak' : 'good', reasons, critical };
 }
 
 export function narrativeCriterion(i: AnalysisInput): Criterion {
-  const matches = matchNarratives(i.token, i.narratives);
+  // Ищем тему и в названии токена, и в том, что о нём пишут в Twitter
+  const description = [i.token.description, i.signals?.hashtags.join(' '), i.signals?.textSample].filter(Boolean).join(' ');
+  const matches = matchNarratives({ ...i.token, description }, i.narratives);
   const reasons: Reason[] = matches.map((m) => ({ ok: true, text: `Нарратив «${m.narrative.name}» (по слову «${m.keyword}»)` }));
+  if (i.signals?.hashtags.length) reasons.push({ ok: null, text: `Хэштеги в твитах: ${i.signals.hashtags.map((h) => `#${h}`).join(' ')}` });
   if (i.answers.narrative) {
     reasons.unshift({
       ok: i.answers.narrative === 'yes',
@@ -312,7 +329,7 @@ export function narrativeCriterion(i: AnalysisInput): Criterion {
     return { id: 'narrative', title: 'Нарратив — в струе', status: i.answers.narrative === 'yes' ? 'good' : 'weak', auto: false, reasons };
   }
   if (!matches.length) {
-    reasons.push({ ok: null, text: 'Совпадений с вашим списком трендов нет — проверьте Trending Tags' });
+    reasons.push({ ok: null, text: 'Совпадений со списком актуальных нарративов нет — проверьте Trending Tags' });
   }
   return { id: 'narrative', title: 'Нарратив — в струе', status: matches.length ? 'good' : 'unknown', auto: true, reasons };
 }

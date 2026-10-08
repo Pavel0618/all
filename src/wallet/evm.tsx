@@ -16,7 +16,8 @@ import {
   type PublicClient,
   type WalletClient,
 } from 'viem';
-import { arbitrum, base, bsc, mainnet } from 'viem/chains';
+import { arbitrum, base, bsc, mainnet, robinhood } from 'viem/chains';
+import { chainByEvmId } from '../lib/chains';
 import { builtinStore } from './builtin';
 import { isTelegram } from '../lib/telegram';
 import { useMemory } from '../lib/ui';
@@ -162,7 +163,8 @@ export function EvmProvider({ children }: { children: ReactNode }) {
       const opsFor = (id: number): Ops => {
         const chain = VIEM_CHAINS[id];
         if (!chain) throw new Error('Сеть не поддерживается');
-        const transport = fallback([http(PUBLIC_RPC[chain.id]), http()]);
+        // Публичный узел из нашего списка сетей, резерв — узел по умолчанию из viem
+        const transport = fallback([http(chainByEvmId(chain.id)?.rpc), http()]);
         return operations(
           () => createPublicClient({ chain, transport }),
           () => createWalletClient({ account: builtinAccount, chain, transport }),
@@ -204,7 +206,28 @@ export function EvmProvider({ children }: { children: ReactNode }) {
       disconnect,
       switchChain: async (target: number) => {
         const { provider } = need();
-        await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: `0x${target.toString(16)}` }] });
+        const hex = `0x${target.toString(16)}`;
+        try {
+          await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: hex }] });
+        } catch (e) {
+          // 4902 — кошелёк не знает сеть (например, Robinhood Chain): добавляем её и переключаемся
+          const code = (e as { code?: number; data?: { originalError?: { code?: number } } }).code ?? (e as { data?: { originalError?: { code?: number } } }).data?.originalError?.code;
+          const viemChain = VIEM_CHAINS[target];
+          if (code !== 4902 || !viemChain) throw e;
+          const info = chainByEvmId(target);
+          await provider.request({
+            method: 'wallet_addEthereumChain',
+            params: [
+              {
+                chainId: hex,
+                chainName: viemChain.name,
+                nativeCurrency: viemChain.nativeCurrency,
+                rpcUrls: [info?.rpc ?? viemChain.rpcUrls.default.http[0]],
+                blockExplorerUrls: info ? [info.explorer] : undefined,
+              },
+            ],
+          });
+        }
         setChainId(target);
       },
       forChain: () => injectedOps,
@@ -221,15 +244,7 @@ export function useEvm(): EvmCtx {
   return ctx;
 }
 
-const VIEM_CHAINS: Record<number, Chain> = { 1: mainnet, 8453: base, 56: bsc, 42161: arbitrum };
-
-/** Публичные узлы с поддержкой запросов из браузера (резерв — узел по умолчанию из viem). */
-const PUBLIC_RPC: Record<number, string> = {
-  1: 'https://ethereum-rpc.publicnode.com',
-  8453: 'https://base-rpc.publicnode.com',
-  56: 'https://bsc-rpc.publicnode.com',
-  42161: 'https://arbitrum-one-rpc.publicnode.com',
-};
+const VIEM_CHAINS: Record<number, Chain> = { 1: mainnet, 8453: base, 56: bsc, 42161: arbitrum, 4663: robinhood };
 
 type Ops = Pick<EvmCtx, 'sendTransaction' | 'waitForReceipt' | 'tokenBalance' | 'nativeBalance' | 'ensureAllowance'>;
 

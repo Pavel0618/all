@@ -7,6 +7,7 @@ import { useToken } from '../lib/useToken';
 import { fmtAmount, fmtPct, fmtPrice, shortAddr, timeAgo } from '../lib/format';
 import { toast } from '../lib/ui';
 import { shareToken } from '../lib/telegram';
+import { useSignals, type SignalsState } from '../lib/signals';
 import { SecurityList, StepCard, VerdictCard, type ToolLink } from './Steps';
 import { TokenIcon } from './TokenCard';
 import { TradePanel } from './TradePanel';
@@ -39,6 +40,9 @@ export function TokenPage({ chain: chainParam, address }: { chain: string; addre
   const symbol = pair?.baseToken.symbol ?? '';
   const name = pair?.baseToken.name ?? '';
 
+  // Автоматический Twitter-анализ (если подключён сервер)
+  const sig = useSignals(chainParam, address, Boolean(pair));
+
   const analysis = useMemo(
     () =>
       analyze({
@@ -51,8 +55,9 @@ export function TokenPage({ chain: chainParam, address }: { chain: string; addre
         narratives: settings.narratives,
         answers,
         thresholds: settings.thresholds,
+        signals: sig.signals,
       }),
-    [market, state.security, state.securityLoaded, socials, name, symbol, settings.narratives, settings.thresholds, answers],
+    [market, state.security, state.securityLoaded, socials, name, symbol, settings.narratives, settings.thresholds, answers, sig.signals],
   );
 
   if (state.loading) {
@@ -205,13 +210,15 @@ export function TokenPage({ chain: chainParam, address }: { chain: string; addre
           ...twitterTools,
         ]}
         question={{
-          text: 'Упоминаний и вовлечённости (лайки, ретвиты) стало резко больше?',
+          text: sig.signals ? 'Не согласны с автооценкой? Упоминаний стало резко больше?' : 'Упоминаний и вовлечённости (лайки, ретвиты) стало резко больше?',
           value: answers.hype,
           onChange: setAnswer('hype'),
           yes: 'Да, растёт',
           no: 'Нет',
         }}
-      />
+      >
+        <TwitterNote sig={sig} />
+      </StepCard>
 
       {/* -------- Шаг 2 -------- */}
       <StepCard
@@ -232,7 +239,9 @@ export function TokenPage({ chain: chainParam, address }: { chain: string; addre
               ]
         }
         question={{
-          text: 'Smart Followers / Score растут, а пишут реальные KOL — не боты и не рекламные пуши?',
+          text: sig.signals
+            ? 'Не согласны с автооценкой? Пишут реальные KOL, а не боты?'
+            : 'Smart Followers / Score растут, а пишут реальные KOL — не боты и не рекламные пуши?',
           value: answers.influencers,
           onChange: setAnswer('influencers'),
           yes: 'Да, реальные',
@@ -240,6 +249,16 @@ export function TokenPage({ chain: chainParam, address }: { chain: string; addre
         }}
       >
         {!handle && !socials?.twitterUrl && <div className="alert">У токена нет Twitter в данных DexScreener.</div>}
+        <TwitterNote sig={sig} />
+        {sig.signals && sig.signals.kols.length > 0 && (
+          <div className="kols">
+            {sig.signals.kols.map((k) => (
+              <a key={k.userName} className="kol" href={toolLinks.twitterProfile(k.userName)} target="_blank" rel="noreferrer">
+                @{k.userName} <span className="muted">{fmtAmount(k.followers)}</span>
+              </a>
+            ))}
+          </div>
+        )}
       </StepCard>
 
       {/* -------- Шаг 3 -------- */}
@@ -328,4 +347,21 @@ export function TokenPage({ chain: chainParam, address }: { chain: string; addre
       />
     </div>
   );
+}
+
+/** Состояние автоматического Twitter-анализа под шагами 1–2. */
+function TwitterNote({ sig }: { sig: SignalsState }) {
+  if (!sig.enabled) return null;
+  if (sig.loading) return <div className="tw-note">🐦 Анализируем Twitter…</div>;
+  if (sig.signals) {
+    const s = sig.signals;
+    return (
+      <div className="tw-note">
+        🐦 Автоматически по {s.sample} твитам{s.complete ? ' за сутки' : ' (самые свежие)'} · обновлено {timeAgo(s.fetchedAt)}
+      </div>
+    );
+  }
+  if (sig.error === 'budget') return <div className="tw-note tw-warn">Лимит Twitter-анализа на сегодня исчерпан — проверьте вручную по кнопкам ниже.</div>;
+  if (sig.error === 'failed') return <div className="tw-note tw-warn">Twitter-анализ сейчас недоступен — проверьте вручную по кнопкам ниже.</div>;
+  return null;
 }

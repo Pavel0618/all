@@ -3,10 +3,10 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useConnection } from '@solana/wallet-adapter-react';
 import { LAMPORTS_PER_SOL, PublicKey, type ParsedAccountData } from '@solana/web3.js';
-import type { Address, Hex } from 'viem';
+import type { Address } from 'viem';
 import { CHAINS, toolLinks, type ChainId } from '../lib/chains';
 import { jupQuote, jupSwapTransaction, priceImpactPercent, routeLabel, SOL_MINT, waitForSignature, type JupQuote } from '../lib/jupiter';
-import { kyberBuild, kyberRoute, NATIVE, type KyberFee, type KyberRoute } from '../lib/kyber';
+import { evmBuild, evmQuote, type EvmQuote, type SwapSide } from '../lib/evmSwap';
 import { evmFeeFor, feeConfigured, feePercentLabel, solanaFeeFor, type SolanaFee } from '../lib/fees';
 import { useSolSigner } from '../wallet/solSigner';
 import { addTrade, settingsStore, useStore } from '../lib/storage';
@@ -434,7 +434,7 @@ function EvmTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; blo
   const [amount, setAmount] = useState(String(settings.defaultBuy[token.chain] ?? chain.buyPresets[1]));
   const [sellPct, setSellPct] = useState(100);
   const [slippage, setSlippage] = useState(settings.slippageBps);
-  const [route, setRoute] = useState<KyberRoute>();
+  const [route, setRoute] = useState<EvmQuote>();
   const [routeErr, setRouteErr] = useState<string>();
   const [quoting, setQuoting] = useState(false);
   const [tokBal, setTokBal] = useState<{ raw: bigint; decimals: number }>();
@@ -469,16 +469,12 @@ function EvmTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; blo
 
   // Комиссию всегда берём с нативной монеты: при покупке — со входа, при продаже — с выхода
   const fee = evmFeeFor(token.chain);
-  const getRoute = useCallback(
-    (raw: bigint) => {
-      const f = evmFeeFor(token.chain);
-      const kf = (by: KyberFee['chargeFeeBy']): KyberFee | undefined => (f ? { ...f, chargeFeeBy: by } : undefined);
-      return mode === 'buy'
-        ? kyberRoute(token.chain, NATIVE, token.address, raw.toString(), kf('currency_in'))
-        : kyberRoute(token.chain, token.address, NATIVE, raw.toString(), kf('currency_out'));
-    },
+  const sideFor = useCallback(
+    (raw: bigint): SwapSide => ({ chain: token.chain, buy: mode === 'buy', token: token.address, amountIn: raw, fee: evmFeeFor(token.chain) }),
     [mode, token.chain, token.address],
   );
+  const account = evm.account;
+  const getRoute = useCallback((raw: bigint) => evmQuote(sideFor(raw), account), [sideFor, account]);
 
   // Встроенный кошелёк переключает сеть сам, без вопросов
   useEffect(() => {
@@ -519,17 +515,20 @@ function EvmTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; blo
       const raw = rawIn;
       if (raw <= 0n) return;
       const ops = evm.forChain(chain.evmChainId!);
+      const side = sideFor(raw);
       setBusy('Получаем лучшую цену…');
-      const r = await getRoute(raw);
-      if (mode === 'sell') {
+      const q = await evmQuote(side, evm.account);
+      if (mode === 'sell' && q.spender) {
         setBusy('Разрешите продажу токена (approve)…');
-        await ops.ensureAllowance(tokenAddr, r.routerAddress as Address, raw);
+        await ops.ensureAllowance(tokenAddr, q.spender, raw);
       }
       setBusy('Собираем транзакцию…');
-      const built = await kyberBuild(token.chain, r, evm.account, slippage);
+      const built = await evmBuild(side, q, evm.account, slippage);
+      if (mode === 'sell' && built.spender && built.spender.toLowerCase() !== q.spender?.toLowerCase()) {
+        await ops.ensureAllowance(tokenAddr, built.spender, raw);
+      }
       setBusy(evm.active?.uuid === 'builtin' ? 'Отправляем…' : 'Подтвердите в кошельке…');
-      const value = mode === 'buy' ? BigInt(built.transactionValue ?? built.amountIn) : 0n;
-      const hash = await ops.sendTransaction({ to: built.routerAddress as Address, data: built.data as Hex, value });
+      const hash = await ops.sendTransaction({ to: built.to, data: built.data, value: built.value });
       setBusy('Ждём подтверждения сети…');
       const status = await ops.waitForReceipt(hash);
       if (status !== 'success') throw new Error('Транзакция отклонена сетью (чаще всего — цена ушла дальше slippage)');
@@ -563,8 +562,8 @@ function EvmTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; blo
     }
   };
 
-  const outUsd = route ? parseFloat(route.routeSummary.amountOutUsd) : undefined;
-  const inUsd = route ? parseFloat(route.routeSummary.amountInUsd) : undefined;
+  const outUsd = route?.amountOutUsd;
+  const inUsd = route?.amountInUsd;
   const loss = inUsd && outUsd ? ((inUsd - outUsd) / inUsd) * 100 : undefined;
 
   return (
@@ -588,9 +587,9 @@ function EvmTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; blo
               <b>
                 {mode === 'buy'
                   ? tokBal
-                    ? `${fmtAmount(fromBaseUnits(route.routeSummary.amountOut, tokBal.decimals))} ${token.symbol}`
+                    ? `${fmtAmount(fromBaseUnits(route.amountOut, tokBal.decimals))} ${token.symbol}`
                     : `${token.symbol} на ${fmtUsd(outUsd)}`
-                  : `${fmtAmount(fromBaseUnits(route.routeSummary.amountOut, 18))} ${chain.native}`}
+                  : `${fmtAmount(fromBaseUnits(route.amountOut, 18))} ${chain.native}`}
               </b>
             </div>
             {loss !== undefined && (
@@ -599,18 +598,22 @@ function EvmTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; blo
                 <span className={loss > 5 ? 'text-bad' : loss > 2 ? 'text-warn' : ''}>{loss.toFixed(2)}%</span>
               </div>
             )}
-            {fee && (
+            {fee && route.feeApplied && (
               <div className="row-between small">
                 <span className="muted">Комиссия сервиса {feePercentLabel(fee.bps)}</span>
                 <span>{inUsd ? `≈ $${((inUsd * fee.bps) / 10_000).toFixed(2)}` : feePercentLabel(fee.bps)}</span>
               </div>
             )}
-            {route.routeSummary.gasUsd && (
+            {route.gasUsd !== undefined && (
               <div className="row-between small">
                 <span className="muted">Комиссия сети</span>
-                <span>≈ ${parseFloat(route.routeSummary.gasUsd).toFixed(2)}</span>
+                <span>≈ ${route.gasUsd.toFixed(2)}</span>
               </div>
             )}
+            <div className="row-between small">
+              <span className="muted">Маршрут</span>
+              <span>{route.provider}</span>
+            </div>
           </>
         )}
       </QuoteBox>
@@ -629,7 +632,7 @@ function EvmTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; blo
               : `Продать ${sellPct}% ${token.symbol}`
         }
       />
-      <div className="muted small center">Обмен через KyberSwap · {chain.name}</div>
+      <div className="muted small center">Обмен через KyberSwap или LI.FI · {chain.name}</div>
     </>
   );
 }

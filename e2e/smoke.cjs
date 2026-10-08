@@ -31,6 +31,7 @@ execSync('npx vite build --outDir e2e/dist --emptyOutDir', {
     VITE_FEE_EVM_WALLET: FEE_EVM,
     VITE_TG_BOT: 'gemradar_bot',
     VITE_TG_APP: 'radar',
+    VITE_SIGNALS_URL: 'https://signals.test',
   },
 });
 
@@ -52,6 +53,8 @@ const FX = (() => {
   };
 })();
 const EVM_TOKEN = '0x1111111111111111111111111111111111111111';
+const RH_TOKEN = '0x4663466346634663466346634663466346634663';
+const LIFI_DIAMOND = '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE';
 const EVM_ACCOUNT = '0x2222222222222222222222222222222222222222';
 const ROUTER = '0x6131B5fae19EA4f9D964eAc0408E4408b66337b5';
 const now = Date.now();
@@ -87,6 +90,7 @@ const PAIRS = {
   [FX.tokenB]: pair('solana', FX.tokenB, 'MOON', 'Moon Rocket', { mcap: 3_400_000, liq: 210000, boosted: true }),
   [FX.tokenC]: pair('solana', FX.tokenC, 'SCAM', 'Totally Safe', { mcap: 90000, liq: 15000, noTwitter: true }),
   [EVM_TOKEN.toLowerCase()]: pair('base', EVM_TOKEN, 'BASED', 'Based Pepe', { mcap: 260000, liq: 55000, priceUsd: '0.000025' }),
+  [RH_TOKEN.toLowerCase()]: pair('robinhood', RH_TOKEN, 'CASHCAT', 'Cash Cat', { mcap: 310000, liq: 61000, priceUsd: '0.00031' }),
 };
 
 const json = (body, status = 200) => ({
@@ -101,6 +105,8 @@ const evmSent = [];
 const jupQuotes = [];
 const jupSwaps = [];
 const kyberRoutes = [];
+const lifiQuotes = [];
+const signalsCalls = [];
 const solRawSent = [];
 const evmRawSent = [];
 const evmRawHosts = [];
@@ -222,6 +228,8 @@ async function routeAll(page) {
 
     if (host === 'api.gopluslabs.io') {
       const addr = url.searchParams.get('contract_addresses');
+      // Robinhood Chain GoPlus не поддерживает — пустой ответ
+      if (url.pathname.endsWith('/4663')) return route.fulfill(json({ code: 1, message: 'OK', result: {} }));
       if (url.pathname.includes('/solana/')) {
         const bad = addr === FX.tokenC;
         return route.fulfill(json({ code: 1, message: 'OK', result: { [addr]: { mintable: { status: bad ? '1' : '0' }, freezable: { status: '0' }, transfer_hook: [] } } }));
@@ -276,6 +284,7 @@ async function routeAll(page) {
 
     if (host === 'aggregator-api.kyberswap.com') {
       if (req.headers()['x-client-id'] !== 'gem-radar') return route.fulfill(json({ code: 4001, message: 'no client id' }, 400));
+      if (url.pathname.startsWith('/robinhood/')) return route.fulfill(json({ code: 4008, message: 'chain not supported' }, 400));
       if (url.pathname.endsWith('/routes')) {
         kyberRoutes.push(url.toString());
         const tokenIn = url.searchParams.get('tokenIn');
@@ -350,6 +359,57 @@ async function routeAll(page) {
       for (const r of [body].flat()) if (r.method === 'eth_sendRawTransaction') evmRawHosts.push(host);
       const res = Array.isArray(body) ? body.map((r) => ({ jsonrpc: '2.0', id: r.id, result: evmRpc(r) })) : { jsonrpc: '2.0', id: body.id, result: evmRpc(body) };
       return route.fulfill(json(res));
+    }
+
+    // Наш сервер Twitter-анализа
+    if (host === 'signals.test') {
+      const address = url.searchParams.get('address');
+      signalsCalls.push(address);
+      if (address !== FX.tokenA) return route.fulfill(json({ symbol: 'X', error: 'budget' }));
+      return route.fulfill(
+        json({
+          chain: 'solana',
+          address,
+          symbol: 'FROGAI',
+          handle: 'frogaicoin',
+          signals: {
+            query: 'q', sample: 18, complete: true, lastHour: 14, perHourBefore: 0.26, acceleration: 53.7, uniqueAuthors: 16,
+            kols: [{ userName: 'bigkol', followers: 250000 }, { userName: 'midkol', followers: 40000 }], kolCount: 2, botShare: 0.06,
+            likes: 180, retweets: 36, views: 9000, hashtags: ['ai'], textSample: '#AI frog agent', fetchedAt: Date.now(),
+            project: { userName: 'frogaicoin', followers: 12000, ageDays: 90 },
+          },
+        }),
+      );
+    }
+
+    // Резервный агрегатор LI.FI (Robinhood Chain)
+    if (host === 'li.quest') {
+      lifiQuotes.push(url.toString());
+      const sell = url.searchParams.get('fromToken').toLowerCase() === RH_TOKEN.toLowerCase();
+      return route.fulfill(
+        json({
+          tool: 'uniswap',
+          estimate: {
+            fromAmount: url.searchParams.get('fromAmount'), toAmount: sell ? '9000000000000000' : '777000000000000000000000',
+            approvalAddress: LIFI_DIAMOND, fromAmountUSD: '25', toAmountUSD: '24.4', gasCosts: [{ amountUSD: '0.01' }],
+          },
+          transactionRequest: { to: LIFI_DIAMOND, data: '0xfeedface', value: sell ? '0x0' : '0x' + BigInt(url.searchParams.get('fromAmount')).toString(16) },
+        }),
+      );
+    }
+
+    // Blockscout Robinhood Chain: открытый контракт без опасных функций
+    if (host === 'robinhoodchain.blockscout.com') {
+      if (url.pathname.includes('/smart-contracts/'))
+        return route.fulfill(json({ is_verified: true, proxy_type: null, abi: [{ type: 'function', name: 'transfer', stateMutability: 'nonpayable' }] }));
+      if (url.pathname.endsWith('/holders')) return route.fulfill(json({ items: [{ address: { hash: '0xa' }, value: '100' }] }));
+      if (url.pathname.includes('/tokens/')) return route.fulfill(json({ total_supply: '10000' }));
+    }
+
+    if (host === 'rpc.mainnet.chain.robinhood.com') {
+      const body = JSON.parse(req.postData() || '{}');
+      // owner() → нулевой адрес (права отозваны)
+      return route.fulfill(json({ jsonrpc: '2.0', id: body.id, result: '0x' + '0'.repeat(64) }));
     }
 
     if (host === 'dexscreener.com') {
@@ -562,11 +622,11 @@ const TG_INIT = ({ startParam }) => {
   await page.locator('.token-card', { hasText: 'FROGAI' }).first().click();
   await page.waitForSelector('.verdict');
   await page.waitForSelector('.sec-list');
+  await page.waitForSelector('#step-1 .tw-note >> text=Автоматически', { timeout: 10000 });
   const v1 = await page.locator('.verdict-title').first().innerText();
-  check('Токен A: до ответов — проверка не завершена', /не завершена/.test(v1), v1);
-  await page.locator('#step-2').getByRole('button', { name: 'Да, реальные' }).click();
-  const v2 = await page.locator('.verdict-title').first().innerText();
-  check('Токен A: после ответа — можно входить', /Можно входить/.test(v2), v2);
+  check('Токен A: Twitter-анализ сам закрыл шаги 1–2 → можно входить без ручных ответов', /Можно входить/.test(v1), v1);
+  check('Токен A: показаны KOL из Twitter', (await page.locator('#step-2 .kol').count()) === 2);
+  check('Токен A: шаг 1 — всплеск упоминаний', /Всплеск интереса: 14 упоминаний/.test(await page.locator('#step-1').innerText()));
   await shot('02-token-go');
 
   // 4. Подключаем Solana-кошелёк и покупаем
@@ -632,11 +692,31 @@ const TG_INIT = ({ startParam }) => {
   check('Продажа Base: approve + swap', sent2.length === 3 && sent2[1].data.startsWith('0x095ea7b3') && sent2[2].data === '0xdeadbeef', JSON.stringify(sent2.map((t) => [t.to, t.data.slice(0, 10), t.value])));
   await shot('05-token-base');
 
+  // Robinhood Chain: своя проверка контракта через Blockscout и покупка через резервный LI.FI
+  await page.goto(`http://localhost:4173/#/token/robinhood/${RH_TOKEN}`);
+  await page.waitForSelector('.sec-list', { timeout: 15000 });
+  check('Robinhood: контракт проверен через Blockscout', /Blockscout/.test(await page.locator('#step-3').innerText()));
+  check('Robinhood: честно — продажа и лок не проверены', (await page.locator('#step-3 .sec-warn').count()) === 2);
+  await page.waitForSelector('.trade >> text=Переключить сеть на Robinhood', { timeout: 10000 });
+  await page.locator('.trade .btn-buy').click();
+  await page.waitForSelector('.trade >> text=Купить CASHCAT', { timeout: 10000 });
+  await page.waitForSelector('.quote >> text=LI.FI', { timeout: 10000 });
+  const before = (await page.evaluate(() => window.__evmSent)).length;
+  await page.locator('.trade .btn-buy').click();
+  await page.waitForSelector('.toast-ok >> text=/Куплено.*CASHCAT/', { timeout: 20000 });
+  {
+    const sent = await page.evaluate(() => window.__evmSent);
+    const tx = sent[before];
+    check('Robinhood: покупка через LI.FI в сети 4663', sent.length === before + 1 && tx.to === LIFI_DIAMOND && tx.data === '0xfeedface' && BigInt(tx.value) > 0n, JSON.stringify(tx));
+    check('Robinhood: KyberSwap не знает сеть → LI.FI с chainId 4663', new URL(lifiQuotes.at(-1)).searchParams.get('fromChain') === '4663');
+  }
+  await shot('05b-token-robinhood');
+
   // 8. Портфель
   await page.goto('http://localhost:4173/#/portfolio');
   await page.waitForSelector('.pos');
   const posCount = await page.locator('section', { hasText: 'Мои позиции' }).locator('.pos').count();
-  check('Портфель: 2 открытые позиции', posCount === 2, `позиций: ${posCount}`);
+  check('Портфель: 3 открытые позиции (Solana, Base, Robinhood)', posCount === 3, `позиций: ${posCount}`);
   await page.waitForTimeout(500);
   await shot('06-portfolio');
 

@@ -1,0 +1,21 @@
+# Сервер Gem Radar: Twitter-анализ для сайта и Telegram-бот с алертами.
+# Деплой делает GitHub Actions (.github/workflows/deploy.yml); вручную: npx wrangler deploy -c worker/wrangler.toml
+name = "gem-radar"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+# Сканер алертов: каждые 15 минут одна сеть по кругу
+[triggers]
+crons = ["*/15 * * * *"]
+
+# Хранилище создаётся автоматически при первом деплое
+[[kv_namespaces]]
+binding = "KV"
+
+[vars]
+DAILY_TWITTER_BUDGET = "120"
+SCAN_TWITTER_PER_RUN = "1"
+
+[observability]
+enabled = true

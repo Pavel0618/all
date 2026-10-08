@@ -20,6 +20,15 @@ const DEFAULT_FEE_EVM_WALLET = '0xa82B263D0F2906aCf03A768F764Fe19cc7f9d534';
 const DEFAULT_TG_BOT = '';
 const DEFAULT_TG_APP = '';
 
+/**
+ * Имя интегратора в LI.FI Portal (portal.li.fi) — нужно только для комиссии на сделках, которые идут через
+ * резервный агрегатор LI.FI. Без него такие сделки проходят без комиссии.
+ */
+const DEFAULT_LIFI_INTEGRATOR = '';
+
+/** Адрес сервера Gem Radar (Cloudflare Worker) — автоматический анализ Twitter. Задаётся при деплое. */
+const DEFAULT_SIGNALS_URL = '';
+
 // ----------------------------------------------------------------------------
 
 const env = (v: string | undefined, fallback: string) => (v && v.trim() ? v.trim() : fallback);
@@ -38,3 +47,5 @@ export const FEE_SOLANA_WALLET = env(import.meta.env.VITE_FEE_SOLANA_WALLET, DEF
 export const FEE_EVM_WALLET = env(import.meta.env.VITE_FEE_EVM_WALLET, DEFAULT_FEE_EVM_WALLET);
 export const TG_BOT = env(import.meta.env.VITE_TG_BOT, DEFAULT_TG_BOT).replace(/^@/, '');
 export const TG_APP = env(import.meta.env.VITE_TG_APP, DEFAULT_TG_APP);
+export const LIFI_INTEGRATOR = env(import.meta.env.VITE_LIFI_INTEGRATOR, DEFAULT_LIFI_INTEGRATOR);
+export const SIGNALS_URL = env(import.meta.env.VITE_SIGNALS_URL, DEFAULT_SIGNALS_URL).replace(/\/+$/, '');
