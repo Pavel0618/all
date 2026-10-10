@@ -3,15 +3,27 @@
 //  GET  /signals   — Twitter-анализ токена для сайта: ?chain=solana&address=…
 //  POST /telegram  — вебхук бота
 //  cron            — сканер алертов (см. wrangler.toml)
-import type { Env } from './env';
+import { allowed, type Env } from './env';
 import { getSignals, loadToken, validToken } from './analyze';
 import { scan } from './scanner';
 import { budgetLeft } from './store';
 import { handleUpdate, webhookSecret } from './telegram';
 
+/** Браузерам разрешаем только наш сайт: чужие сайты не смогут тратить наш Twitter-лимит из своих страниц. */
+export function allowedOrigin(env: Env): string {
+  if (env.ALLOWED_ORIGIN) return env.ALLOWED_ORIGIN;
+  try {
+    if (env.SITE_URL) return new URL(env.SITE_URL).origin;
+  } catch {
+    /* неверный SITE_URL */
+  }
+  return '*';
+}
+
 function cors(env: Env): Record<string, string> {
   return {
-    'Access-Control-Allow-Origin': env.ALLOWED_ORIGIN || '*',
+    'Access-Control-Allow-Origin': allowedOrigin(env),
+    Vary: 'Origin',
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
   };
@@ -24,10 +36,20 @@ function json(env: Env, body: unknown, status = 200, extra: Record<string, strin
   });
 }
 
-async function handleSignals(env: Env, url: URL, now: number): Promise<Response> {
+/** Сравнение секрета за постоянное время — по времени ответа его не подобрать. */
+export function sameSecret(a: string | null, b: string): boolean {
+  if (a === null || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+async function handleSignals(env: Env, req: Request, url: URL, now: number): Promise<Response> {
   const chain = url.searchParams.get('chain') ?? '';
   const address = url.searchParams.get('address') ?? '';
   if (!validToken(chain, address)) return json(env, { error: 'bad_request' }, 400);
+  const ip = req.headers.get('CF-Connecting-IP') ?? 'unknown';
+  if (!(await allowed(env.SIGNALS_LIMIT, ip))) return json(env, { error: 'rate_limited' }, 429, { 'Retry-After': '60' });
   // Берём токен с DexScreener на сервере: так нельзя потратить лимит на случайные адреса
   const token = await loadToken(chain, address).catch(() => undefined);
   if (!token) return json(env, { error: 'not_found' }, 404);
@@ -53,12 +75,12 @@ export default {
       });
     }
 
-    if (url.pathname === '/signals' && req.method === 'GET') return handleSignals(env, url, now);
+    if (url.pathname === '/signals' && req.method === 'GET') return handleSignals(env, req, url, now);
 
     if (url.pathname === '/telegram' && req.method === 'POST') {
       if (!env.TELEGRAM_BOT_TOKEN) return new Response('bot disabled', { status: 404 });
       const secret = req.headers.get('X-Telegram-Bot-Api-Secret-Token');
-      if (secret !== (await webhookSecret(env.TELEGRAM_BOT_TOKEN))) return new Response('forbidden', { status: 403 });
+      if (!sameSecret(secret, await webhookSecret(env.TELEGRAM_BOT_TOKEN))) return new Response('forbidden', { status: 403 });
       const update = await req.json().catch(() => ({}));
       // Отвечаем Telegram сразу, а проверку монеты делаем в фоне
       ctx.waitUntil(handleUpdate(env, update as Parameters<typeof handleUpdate>[1], now).catch((e) => console.error('update', e)));

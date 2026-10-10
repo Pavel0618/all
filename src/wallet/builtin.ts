@@ -1,6 +1,8 @@
 // Встроенный кошелёк для Telegram Mini App.
 // Внутри Telegram нет расширений Phantom/MetaMask, поэтому ключи создаются прямо в приложении
-// и хранятся ТОЛЬКО на устройстве пользователя (SecureStorage → DeviceStorage → localStorage).
+// и хранятся ТОЛЬКО на устройстве пользователя: в SecureStorage (Keychain / Keystore) или DeviceStorage Telegram.
+// В localStorage браузера ключи НЕ пишутся: на адресе <ник>.github.io его видят все сайты этого ника на GitHub Pages.
+// Старую копию оттуда (если была) переносим в хранилище Telegram и стираем.
 // На сервер ключи не отправляются — сервера у приложения нет.
 import bs58 from 'bs58';
 import { Keypair, type PublicKey } from '@solana/web3.js';
@@ -69,6 +71,8 @@ export async function loadBuiltin(): Promise<void> {
       const w = raw ? parseStored(raw) : undefined;
       if (w) {
         apply(w, store.kind);
+        // Ключи нашлись в localStorage (старая версия) — переносим в хранилище Telegram
+        if (store.kind === 'local') await save(w).then((kind) => apply(w, kind)).catch(() => undefined);
         return;
       }
     } catch {
@@ -78,22 +82,33 @@ export async function loadBuiltin(): Promise<void> {
   apply(undefined);
 }
 
+export const NO_SAFE_STORAGE =
+  'Для встроенного кошелька нужен Telegram версии 9.0 или новее: ключи хранятся только в защищённом хранилище Telegram. Обновите приложение Telegram и откройте радар снова.';
+
+/** Есть ли где хранить ключи безопасно (SecureStorage / DeviceStorage Telegram). */
+export function canStoreKeysSafely(): boolean {
+  return keyStores().some((s) => s.kind !== 'local');
+}
+
 async function save(w: StoredWallet): Promise<KeyValueStore['kind']> {
   const raw = JSON.stringify(w);
-  const stores = keyStores();
-  for (let i = 0; i < stores.length; i++) {
-    const store = stores[i];
+  const all = keyStores();
+  for (let i = 0; i < all.length; i++) {
+    const store = all[i];
+    // localStorage для ключей не годится — его могут прочитать другие сайты на том же адресе
+    if (store.kind === 'local') continue;
     try {
       await store.set(STORAGE_KEY, raw);
       if ((await store.get(STORAGE_KEY)) !== raw) continue;
-      // Убираем старые копии из менее надёжных хранилищ
-      for (const weaker of stores.slice(i + 1)) await weaker.remove(STORAGE_KEY).catch(() => undefined);
+      // Убираем копии только из менее надёжных хранилищ (в том числе старую из localStorage).
+      // Более надёжные не трогаем: если они просто не ответили, там может лежать настоящий ключ
+      for (const weaker of all.slice(i + 1)) await weaker.remove(STORAGE_KEY).catch(() => undefined);
       return store.kind;
     } catch {
       /* пробуем следующее */
     }
   }
-  throw new Error('Не удалось сохранить ключи на устройстве');
+  throw new Error(NO_SAFE_STORAGE);
 }
 
 /**
@@ -116,6 +131,7 @@ async function assertNoExistingWallet(): Promise<void> {
 }
 
 export async function createBuiltin(): Promise<void> {
+  if (!canStoreKeysSafely()) throw new Error(NO_SAFE_STORAGE);
   await assertNoExistingWallet();
   const w: StoredWallet = {
     v: 1,
@@ -165,6 +181,7 @@ export async function importBuiltin(text: string): Promise<{ sol: boolean; evm: 
   // Массив Solflare может содержать пробелы — пробуем строку целиком
   sol ??= parseSolanaSecret(text);
   if (!sol && !evm) throw new Error('Не похоже на приватный ключ Solana или EVM');
+  if (!canStoreKeysSafely()) throw new Error(NO_SAFE_STORAGE);
   await assertNoExistingWallet();
   const w: StoredWallet = {
     v: 1,

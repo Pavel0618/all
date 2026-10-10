@@ -133,7 +133,7 @@ export async function scan(env: Env, now: number): Promise<ScanLog> {
     if (!token) continue;
     twitterChecks++;
     log.checked.push(token.symbol);
-    const report = await fullReport(env, token, now, { twitter: true, security });
+    const report = await fullReport(env, token, now, { twitter: true, security, source: 'scan' });
     if (report.analysis.verdict.level !== 'go') continue;
 
     await putJsonKV(env, alertKey(chain, addr), { at: now }, 24 * 3600);

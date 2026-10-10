@@ -50,6 +50,9 @@ const MAX_PRIORITY_LAMPORTS: Record<PriorityLevel, number> = {
   veryHigh: 4_000_000, // 0.004 SOL
 };
 
+/** Предел приоритетной комиссии для проверки транзакции (с запасом на округление у Jupiter). */
+export const priorityCapLamports = (p: PriorityLevel) => Math.round((MAX_PRIORITY_LAMPORTS[p] ?? MAX_PRIORITY_LAMPORTS.high) * 1.5) + 10_000;
+
 export async function jupSwapTransaction(
   quote: JupQuote,
   userPublicKey: string,

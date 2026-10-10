@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useConnection } from '@solana/wallet-adapter-react';
 import { LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
 import { formatEther, isAddress, parseEther, type Address } from 'viem';
-import { builtinStore, createBuiltin, deleteBuiltin, exportKeys, importBuiltin, markBackedUp } from './builtin';
+import { builtinStore, canStoreKeysSafely, createBuiltin, deleteBuiltin, exportKeys, importBuiltin, markBackedUp, NO_SAFE_STORAGE } from './builtin';
 import { useEvm } from './evm';
 import { useSolSigner } from './solSigner';
 import { CHAIN_LIST, CHAINS, chainByEvmId, toolLinks, type ChainId } from '../lib/chains';
@@ -25,7 +25,7 @@ async function copy(text: string, what: string) {
 const STORAGE_TEXT = {
   secure: 'в защищённом хранилище телефона (Keychain / Keystore)',
   device: 'в хранилище Telegram на этом устройстве',
-  local: 'в памяти браузера на этом устройстве — держите здесь только небольшую сумму',
+  local: 'в памяти браузера (старая версия) — обновите Telegram: ключи перенесутся в защищённое хранилище',
 };
 
 export function BuiltinWallet() {
@@ -46,15 +46,17 @@ export function BuiltinWallet() {
 
 function Onboarding({ onImport }: { onImport: () => void }) {
   const [busy, setBusy] = useState(false);
+  const safe = canStoreKeysSafely();
   return (
     <div className="bw">
       <p>
         Внутри Telegram нельзя подключить Phantom или MetaMask, поэтому здесь работает <b>встроенный кошелёк</b>. Ключи создаются и хранятся
         только на вашем устройстве — у сервиса нет к ним доступа.
       </p>
+      {!safe && <div className="alert alert-warn">{NO_SAFE_STORAGE}</div>}
       <button
         className="btn btn-primary btn-block btn-big"
-        disabled={busy}
+        disabled={busy || !safe}
         onClick={async () => {
           setBusy(true);
           try {
@@ -68,7 +70,7 @@ function Onboarding({ onImport }: { onImport: () => void }) {
       >
         {busy ? 'Создаём…' : 'Создать кошелёк'}
       </button>
-      <button className="btn btn-ghost btn-block" onClick={onImport}>
+      <button className="btn btn-ghost btn-block" onClick={onImport} disabled={!safe}>
         У меня есть ключ — импортировать
       </button>
       <p className="muted small center">
@@ -255,7 +257,7 @@ function WalletHome({ onWithdraw, onKeys }: { onWithdraw: () => void; onKeys: ()
         <button
           className="btn btn-ghost"
           onClick={async () => {
-            if (await confirmDialog('Показать приватные ключи? Убедитесь, что экран никто не видит.')) onKeys();
+            if (await confirmDialog('Показать приватные ключи? Убедитесь, что экран никто не видит. Никогда не отправляйте ключи никому — ни «поддержке», ни ботам, ни сайтам.')) onKeys();
           }}
         >
           Ключи
@@ -305,6 +307,9 @@ function WithdrawView({ onBack }: { onBack: () => void }) {
 
   const send = async () => {
     if (!valid) return;
+    // Последняя проверка перед необратимым переводом: адрес целиком (вирусы подменяют адрес в буфере обмена)
+    const ok = await confirmDialog(`Отправить ${amount || '0'} ${info.native} в сети ${info.name} на адрес:\n${to.trim()}\n\nСверьте адрес целиком — перевод нельзя отменить.`);
+    if (!ok) return;
     try {
       if (chain === 'solana') {
         if (!signer.publicKey) throw new Error('Кошелёк не найден');

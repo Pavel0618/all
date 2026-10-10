@@ -49,9 +49,36 @@ export interface TokenProfile {
 }
 
 /** Все пулы токена в сети (может прийти пустой массив). */
+/** Только https-ссылки: адреса из ответа API не должны стать javascript:/data:-ссылкой или картинкой с чужого http. */
+export function httpsUrl(u: unknown): string | undefined {
+  if (typeof u !== 'string') return undefined;
+  try {
+    return new URL(u).protocol === 'https:' ? u : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function clean(p: DexPair): DexPair {
+  const url = p.url?.startsWith('https://dexscreener.com/') ? p.url : `https://dexscreener.com/${p.chainId}/${p.pairAddress}`;
+  if (!p.info) return { ...p, url };
+  return {
+    ...p,
+    url,
+    info: {
+      ...p.info,
+      imageUrl: httpsUrl(p.info.imageUrl),
+      websites: (p.info.websites ?? []).filter((w) => httpsUrl(w.url)),
+      socials: (p.info.socials ?? []).map((x) => ({ ...x, url: httpsUrl(x.url) })),
+    },
+  };
+}
+
+const cleanAll = (list: DexPair[] | null | undefined) => (list ?? []).map(clean);
+
 export async function getTokenPairs(chain: ChainId, address: string): Promise<DexPair[]> {
   const data = await getJson<DexPair[] | { pairs?: DexPair[] }>(`${API}/tokens/v1/${chain}/${address}`);
-  return Array.isArray(data) ? data : (data.pairs ?? []);
+  return cleanAll(Array.isArray(data) ? data : data.pairs);
 }
 
 /** Пулы сразу для нескольких токенов (до 30 адресов за раз). */
@@ -60,7 +87,7 @@ export async function getTokensBatch(chain: ChainId, addresses: string[]): Promi
   for (let i = 0; i < addresses.length; i += 30) {
     const chunk = addresses.slice(i, i + 30);
     const data = await getJson<DexPair[]>(`${API}/tokens/v1/${chain}/${chunk.join(',')}`, { ttlMs: 30_000 });
-    if (Array.isArray(data)) out.push(...data);
+    if (Array.isArray(data)) out.push(...cleanAll(data));
   }
   return out;
 }
@@ -70,24 +97,26 @@ export async function getPair(chain: ChainId, pairAddress: string): Promise<DexP
   const data = await getJson<{ pairs?: DexPair[] | null; pair?: DexPair | null }>(
     `${API}/latest/dex/pairs/${chain}/${pairAddress}`,
   );
-  return data.pairs?.[0] ?? data.pair ?? undefined;
+  const p = data.pairs?.[0] ?? data.pair ?? undefined;
+  return p ? clean(p) : undefined;
 }
 
 /** Поиск по адресу без сети (EVM-адрес может быть в любой сети). */
 export async function getTokenAnyChain(address: string): Promise<DexPair[]> {
   const data = await getJson<{ pairs?: DexPair[] | null }>(`${API}/latest/dex/tokens/${address}`);
-  return data.pairs ?? [];
+  return cleanAll(data.pairs);
 }
 
 /** Поиск по названию / тикеру. */
 export async function searchPairs(query: string): Promise<DexPair[]> {
   const data = await getJson<{ pairs?: DexPair[] | null }>(`${API}/latest/dex/search?q=${encodeURIComponent(query)}`);
-  return (data.pairs ?? []).filter((p) => isChainId(p.chainId));
+  return cleanAll(data.pairs).filter((p) => isChainId(p.chainId));
 }
 
 /** Свежие профили токенов (проекты, которые только что заполнили соцсети на DexScreener). */
 export async function getLatestProfiles(): Promise<TokenProfile[]> {
-  return getJson<TokenProfile[]>(`${API}/token-profiles/latest/v1`, { ttlMs: 60_000 });
+  const list = await getJson<TokenProfile[]>(`${API}/token-profiles/latest/v1`, { ttlMs: 60_000 });
+  return (Array.isArray(list) ? list : []).map((p) => ({ ...p, icon: httpsUrl(p.icon), links: (p.links ?? []).filter((l) => httpsUrl(l.url)) }));
 }
 
 /** Токены с активным платным «бустом» (= реклама на DexScreener). */

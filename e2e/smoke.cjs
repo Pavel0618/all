@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 const { chromium } = require('playwright');
-const { Keypair, TransactionMessage, VersionedTransaction, SystemProgram, PublicKey } = require('@solana/web3.js');
+const { Keypair, TransactionMessage, VersionedTransaction, SystemProgram, PublicKey, ComputeBudgetProgram, TransactionInstruction } = require('@solana/web3.js');
 
 const ROOT = path.join(__dirname, '..');
 const DIST = path.join(__dirname, 'dist');
@@ -129,13 +129,44 @@ const solRawSent = [];
 const evmRawSent = [];
 const evmRawHosts = [];
 
+// Транзакция как у Jupiter: лимиты вычислений, свой wSOL-счёт, обмен, закрытие счёта.
+// evil — «взломанный API»: в конце лишний перевод SOL злоумышленнику
+const JUP_PROGRAM = new PublicKey('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUJoi5QNyVTaV4');
+const ATTACKER = Keypair.generate().publicKey;
+let jupEvil = false;
 function swapTxFor(userPublicKey) {
   const payer = new PublicKey(userPublicKey);
-  const msg = new TransactionMessage({
-    payerKey: payer,
-    recentBlockhash: '4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi',
-    instructions: [SystemProgram.transfer({ fromPubkey: payer, toPubkey: new PublicKey('11111111111111111111111111111112'), lamports: 1 })],
-  }).compileToV0Message();
+  const wsol = PublicKey.findProgramAddressSync([payer.toBuffer(), TOKEN_PROGRAM.toBuffer(), WSOL.toBuffer()], ATA_PROGRAM)[0];
+  const instructions = [
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }),
+    new TransactionInstruction({
+      programId: ATA_PROGRAM,
+      keys: [
+        { pubkey: payer, isSigner: true, isWritable: true },
+        { pubkey: wsol, isSigner: false, isWritable: true },
+        { pubkey: payer, isSigner: false, isWritable: false },
+        { pubkey: WSOL, isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: TOKEN_PROGRAM, isSigner: false, isWritable: false },
+      ],
+      data: Buffer.from([1]),
+    }),
+    SystemProgram.transfer({ fromPubkey: payer, toPubkey: wsol, lamports: 1 }),
+    new TransactionInstruction({ programId: TOKEN_PROGRAM, keys: [{ pubkey: wsol, isSigner: false, isWritable: true }], data: Buffer.from([17]) }),
+    new TransactionInstruction({ programId: JUP_PROGRAM, keys: [{ pubkey: payer, isSigner: true, isWritable: true }], data: Buffer.from([0xe5, 0x17, 0xcb, 0x97]) }),
+    new TransactionInstruction({
+      programId: TOKEN_PROGRAM,
+      keys: [
+        { pubkey: wsol, isSigner: false, isWritable: true },
+        { pubkey: payer, isSigner: false, isWritable: true },
+        { pubkey: payer, isSigner: true, isWritable: false },
+      ],
+      data: Buffer.from([9]),
+    }),
+  ];
+  if (jupEvil) instructions.push(SystemProgram.transfer({ fromPubkey: payer, toPubkey: ATTACKER, lamports: 5_000_000_000 }));
+  const msg = new TransactionMessage({ payerKey: payer, recentBlockhash: '4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi', instructions }).compileToV0Message();
   return Buffer.from(new VersionedTransaction(msg).serialize()).toString('base64');
 }
 
@@ -502,6 +533,12 @@ const RULER_PIXELS = () => {
 };
 const measureText = async (pg) => ((await pg.locator('#step-4 .chart-measure').textContent()) ?? '').trim();
 
+// Нарушения политики безопасности (CSP) — собираем, чтобы проверить, что приложение её не нарушает
+const CSP_WATCH = () => {
+  window.__csp = [];
+  document.addEventListener('securitypolicyviolation', (e) => window.__csp.push(`${e.violatedDirective} ${e.blockedURI}`));
+};
+
 const INIT = ({ fx, evmAccount }) => {
   // ---- Тестовый Solana-кошелёк (Wallet Standard) ----
   const listeners = {};
@@ -673,6 +710,7 @@ const TG_INIT = ({ startParam }) => {
   const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
   await context.addInitScript(INIT, { fx: FX, evmAccount: EVM_ACCOUNT });
+  await context.addInitScript(CSP_WATCH);
   const page = await context.newPage();
   const errors = [];
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
@@ -792,6 +830,20 @@ const TG_INIT = ({ startParam }) => {
   await page.waitForSelector('.toast-ok >> text=/Продано.*SOL/', { timeout: 20000 });
   check('Продажа Solana: прошла', (await page.evaluate(() => window.__solSent)) === 2);
 
+  // Атака: «взломанный» Jupiter добавил в транзакцию перевод 5 SOL злоумышленнику — подписывать нельзя
+  {
+    jupEvil = true;
+    await page.locator('.trade .seg-wide').getByRole('button', { name: 'Купить' }).click();
+    await page.waitForSelector('.quote >> text=Вы получите', { timeout: 10000 });
+    await page.locator('.trade .btn-buy').click();
+    const blocked = await page
+      .waitForSelector('.toast-error >> text=Сделка остановлена', { timeout: 15000 })
+      .then(async (el) => (await el.innerText()).replace(/\n/g, ' '))
+      .catch(() => '');
+    check('Защита: подменённая транзакция Jupiter не подписана', Boolean(blocked) && (await page.evaluate(() => window.__solSent)) === 2, blocked);
+    jupEvil = false;
+  }
+
   // 6. Опасный токен C
   await page.goto(`http://localhost:4173/#/token/solana/${FX.tokenC}`);
   await page.waitForSelector('.verdict-danger', { timeout: 15000 });
@@ -891,6 +943,7 @@ const TG_INIT = ({ startParam }) => {
   // ================= Telegram Mini App =================
   const tctx = await browser.newContext({ viewport: { width: 390, height: 800 }, deviceScaleFactor: 2 });
   await tctx.addInitScript(TG_INIT, { startParam: `solana_${FX.tokenA}` });
+  await tctx.addInitScript(CSP_WATCH);
   const tp = await tctx.newPage();
   tp.on('console', (m) => m.type() === 'error' && !/telegram-web-app|ERR_FAILED/.test(m.text() + (m.location()?.url ?? '')) && errors.push('[tg] ' + m.text()));
   tp.on('pageerror', (e) => errors.push('[tg] PAGEERROR ' + e.message));
@@ -980,6 +1033,24 @@ const TG_INIT = ({ startParam }) => {
   await tp.locator('.modal').getByRole('button', { name: 'Вывести', exact: true }).click();
   await tp.waitForSelector('.toast-ok >> text=/Отправлено 0.01 BNB/', { timeout: 20000 });
   check('TG: вывод BNB уходит именно в сеть BNB', evmRawHosts.at(-1) === 'bsc-rpc.publicnode.com', evmRawHosts.join(','));
+
+  // CSP: на страницах не было ни одного заблокированного запроса или скрипта
+  {
+    const meta = await tp.evaluate(() => document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute('content') ?? '');
+    check('CSP: политика есть в собранном сайте', /script-src 'self' 'sha256-/.test(meta), meta.slice(0, 80));
+    const v1 = await page.evaluate(() => window.__csp || []);
+    const v2 = await tp.evaluate(() => window.__csp || []);
+    check('CSP: приложение ничего не нарушает (сайт и Mini App)', v1.length === 0 && v2.length === 0, JSON.stringify([...v1, ...v2]).slice(0, 300));
+    // Атака: внедрить свой скрипт в страницу — браузер не должен его выполнить
+    const ran = await tp.evaluate(async () => {
+      const s = document.createElement('script');
+      s.textContent = 'window.__pwned = 1';
+      document.body.appendChild(s);
+      await new Promise((r) => setTimeout(r, 100));
+      return window.__pwned === 1;
+    });
+    check('CSP: внедрённый скрипт не выполняется', !ran);
+  }
 
   console.log(results.join('\n'));
   console.log('unknown solana rpc:', [...unknownRpc].join(', ') || '—');

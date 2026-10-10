@@ -1,6 +1,12 @@
 # Публикация: сервер (Cloudflare Worker) → сайт (GitHub Pages) → настройка Telegram-бота.
 # Один раз: Settings → Pages → Source: GitHub Actions. Ключи — в Settings → Secrets and variables → Actions
 # (пошагово: docs/SERVER_SETUP.md). Без ключей Cloudflare публикуется только сайт, как раньше.
+#
+# Безопасность (docs/SECURITY.md):
+#  • каждый секрет виден только тому шагу, которому он нужен — не установке пакетов и не сборке;
+#  • пакеты ставятся с --ignore-scripts: чужой код из npm не запускается при установке;
+#  • действия GitHub закреплены по коммиту, а не по тегу, который можно перевесить;
+#  • значения переменных попадают в скрипты через env, а не подстановкой ${{ }} в текст команды.
 name: Deploy
 
 on:
@@ -10,8 +16,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -25,11 +29,6 @@ jobs:
     outputs:
       url: ${{ steps.deploy.outputs.url }}
       site: ${{ steps.site.outputs.url }}
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      TWITTERAPI_KEY: ${{ secrets.TWITTERAPI_KEY }}
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
     steps:
       - name: Site address
         id: site
@@ -39,22 +38,30 @@ jobs:
           url="$SITE_URL"
           if [ -z "$url" ]; then url="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}/"; fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
-      - name: Cloudflare not configured
-        if: env.CLOUDFLARE_API_TOKEN == ''
-        run: echo "::notice::Сервер не опубликован — добавьте секреты CLOUDFLARE_API_TOKEN и CLOUDFLARE_ACCOUNT_ID (docs/SERVER_SETUP.md)"
-      - uses: actions/checkout@v4
-        if: env.CLOUDFLARE_API_TOKEN != ''
-      - uses: actions/setup-node@v4
-        if: env.CLOUDFLARE_API_TOKEN != ''
+      - name: Is Cloudflare configured
+        id: cf
+        env:
+          HAS_CF: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        run: |
+          echo "on=$HAS_CF" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_CF" != "true" ]; then echo "::notice::Сервер не опубликован — добавьте секреты CLOUDFLARE_API_TOKEN и CLOUDFLARE_ACCOUNT_ID (docs/SERVER_SETUP.md)"; fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: steps.cf.outputs.on == 'true'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: steps.cf.outputs.on == 'true'
         with:
           node-version: 22
           cache: npm
-      - if: env.CLOUDFLARE_API_TOKEN != ''
-        run: npm ci
+      - if: steps.cf.outputs.on == 'true'
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Deploy worker
         id: deploy
-        if: env.CLOUDFLARE_API_TOKEN != ''
+        if: steps.cf.outputs.on == 'true'
         env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           SITE_URL: ${{ steps.site.outputs.url }}
           ALERT_CHAT_ID: ${{ vars.ALERT_CHAT_ID }}
           DAILY_TWITTER_BUDGET: ${{ vars.DAILY_TWITTER_BUDGET }}
@@ -67,16 +74,30 @@ jobs:
           if [ -z "$url" ]; then echo "::error::Не удалось узнать адрес сервера. Откройте Cloudflare → Workers & Pages один раз, чтобы создать поддомен workers.dev"; exit 1; fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
       - name: Secrets
-        if: env.CLOUDFLARE_API_TOKEN != ''
+        if: steps.cf.outputs.on == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TWITTERAPI_KEY: ${{ secrets.TWITTERAPI_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
+          # Значение идёт через stdin — его нет ни в аргументах команды, ни в логе
           if [ -n "$TWITTERAPI_KEY" ]; then printf '%s' "$TWITTERAPI_KEY" | npx wrangler secret put TWITTERAPI_KEY -c worker/wrangler.toml; fi
           if [ -n "$TELEGRAM_BOT_TOKEN" ]; then printf '%s' "$TELEGRAM_BOT_TOKEN" | npx wrangler secret put TELEGRAM_BOT_TOKEN -c worker/wrangler.toml; fi
       - name: Check server
-        if: env.CLOUDFLARE_API_TOKEN != ''
-        run: curl -fsS "${{ steps.deploy.outputs.url }}/health" && echo
+        if: steps.cf.outputs.on == 'true'
+        env:
+          WORKER_URL: ${{ steps.deploy.outputs.url }}
+        run: curl -fsS "$WORKER_URL/health" && echo
       - name: Configure Telegram bot
-        if: env.CLOUDFLARE_API_TOKEN != '' && env.TELEGRAM_BOT_TOKEN != ''
-        run: node worker/setup-bot.mjs "${{ steps.deploy.outputs.url }}" "${{ steps.site.outputs.url }}"
+        if: steps.cf.outputs.on == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          WORKER_URL: ${{ steps.deploy.outputs.url }}
+          SITE_URL: ${{ steps.site.outputs.url }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then echo "Бот не настроен: нет секрета TELEGRAM_BOT_TOKEN"; exit 0; fi
+          node worker/setup-bot.mjs "$WORKER_URL" "$SITE_URL"
 
   build:
     name: Site
@@ -84,22 +105,27 @@ jobs:
     # Сайт публикуется, даже если сервер не настроен или упал (тогда без Twitter-анализа)
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    env:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm test
       - name: Bot username for share links
+        env:
+          TG_BOT: ${{ vars.TG_BOT }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
-          bot="${{ vars.TG_BOT }}"
+          bot="$TG_BOT"
           if [ -z "$bot" ] && [ -n "$TELEGRAM_BOT_TOKEN" ]; then
             bot=$(curl -fsS "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getMe" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).result?.username??''))" || true)
           fi
+          # Только буквы, цифры и _ — иначе это не username бота
+          if ! [[ "$bot" =~ ^[A-Za-z0-9_]{0,64}$ ]]; then bot=""; fi
           echo "VITE_TG_BOT=$bot" >> "$GITHUB_ENV"
       - run: npm run build
         env:
@@ -110,7 +136,7 @@ jobs:
           VITE_TG_APP: ${{ vars.TG_APP }}
           VITE_LIFI_INTEGRATOR: ${{ vars.LIFI_INTEGRATOR }}
           VITE_SIGNALS_URL: ${{ needs.worker.outputs.url || vars.SIGNALS_URL }}
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: dist
 
@@ -118,9 +144,13 @@ jobs:
     name: Publish site
     needs: build
     runs-on: ubuntu-latest
+    # Права на публикацию — только у этого шага
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

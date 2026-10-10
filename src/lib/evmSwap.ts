@@ -5,6 +5,7 @@ import type { ChainId } from './chains';
 import { kyberBuild, kyberRoute, NATIVE, type KyberFee, type KyberRoute } from './kyber';
 import { LIFI_NATIVE, lifiQuote, type LifiQuote } from './lifi';
 import { LIFI_INTEGRATOR } from '../config';
+import { assertEvmValue, assertTrustedRouter } from './txGuard';
 
 export interface EvmQuote {
   provider: 'KyberSwap' | 'LI.FI';
@@ -49,6 +50,7 @@ function lifiFee(fee: SwapSide['fee']) {
 }
 
 function fromLifi(q: LifiQuote, feeApplied: boolean): EvmQuote {
+  if (q.estimate.approvalAddress) assertTrustedRouter('LI.FI', q.estimate.approvalAddress, 'для разрешения (approve)');
   return {
     provider: 'LI.FI',
     amountIn: q.estimate.fromAmount,
@@ -67,6 +69,7 @@ export async function evmQuote(side: SwapSide, account?: string): Promise<EvmQuo
     const r = side.buy
       ? await kyberRoute(side.chain, NATIVE, side.token, side.amountIn.toString(), kf)
       : await kyberRoute(side.chain, side.token, NATIVE, side.amountIn.toString(), kf);
+    assertTrustedRouter('KyberSwap', r.routerAddress, 'роутера');
     return {
       provider: 'KyberSwap',
       amountIn: r.routeSummary.amountIn,
@@ -101,10 +104,13 @@ export async function evmQuote(side: SwapSide, account?: string): Promise<EvmQuo
 export async function evmBuild(side: SwapSide, quote: EvmQuote, account: string, slippageBps: number): Promise<EvmTx> {
   if (quote.provider === 'KyberSwap' && quote.kyber) {
     const built = await kyberBuild(side.chain, quote.kyber, account, slippageBps);
+    assertTrustedRouter('KyberSwap', built.routerAddress, 'получателя транзакции');
+    const value = side.buy ? BigInt(built.transactionValue ?? built.amountIn) : 0n;
+    assertEvmValue(side.buy, value, side.amountIn);
     return {
       to: built.routerAddress as Address,
       data: built.data as Hex,
-      value: side.buy ? BigInt(built.transactionValue ?? built.amountIn) : 0n,
+      value,
       spender: quote.kyber.routerAddress as Address,
       amountIn: built.amountIn,
       amountOut: built.amountOut,
@@ -120,10 +126,14 @@ export async function evmBuild(side: SwapSide, quote: EvmQuote, account: string,
     fee: quote.feeApplied ? lifiFee(side.fee) : undefined,
   });
   if (!q.transactionRequest) throw new Error('LI.FI не вернул транзакцию');
+  assertTrustedRouter('LI.FI', q.transactionRequest.to, 'получателя транзакции');
+  if (q.estimate.approvalAddress) assertTrustedRouter('LI.FI', q.estimate.approvalAddress, 'для разрешения (approve)');
+  const value = side.buy ? BigInt(q.transactionRequest.value ?? side.amountIn.toString()) : 0n;
+  assertEvmValue(side.buy, value, side.amountIn);
   return {
     to: q.transactionRequest.to as Address,
     data: q.transactionRequest.data as Hex,
-    value: side.buy ? BigInt(q.transactionRequest.value ?? side.amountIn.toString()) : 0n,
+    value,
     spender: q.estimate.approvalAddress as Address | undefined,
     amountIn: q.estimate.fromAmount,
     amountOut: q.estimate.toAmount,

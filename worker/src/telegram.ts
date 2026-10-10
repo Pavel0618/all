@@ -2,7 +2,7 @@
 import { CHAINS, isChainId, parseUserInput, type ChainId } from '../../src/lib/chains';
 import { getTokenAnyChain, mainPair } from '../../src/lib/dexscreener';
 import { fmtUsd, type CriterionStatus } from '../../src/lib/analysis';
-import type { Env } from './env';
+import { allowed, type Env } from './env';
 import { fullReport, loadToken, type FullReport } from './analyze';
 import { subscribe, unsubscribe } from './store';
 
@@ -111,6 +111,11 @@ async function resolveToken(text: string) {
 }
 
 async function replyReport(env: Env, chatId: number, text: string, privateChat: boolean, now: number) {
+  // Каждая проверка тратит платный Twitter-лимит — не больше нескольких в минуту из одного чата
+  if (!(await allowed(env.BOT_LIMIT, `chat:${chatId}`))) {
+    await tg(env, 'sendMessage', { chat_id: chatId, text: 'Слишком много проверок подряд — подождите минуту.' });
+    return;
+  }
   const token = await resolveToken(text).catch(() => undefined);
   if (!token) {
     await tg(env, 'sendMessage', { chat_id: chatId, text: 'Не нашёл такую монету на DexScreener. Пришлите адрес контракта или ссылку.' });

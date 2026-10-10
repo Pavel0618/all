@@ -1,7 +1,7 @@
 // Работа с KV. На бесплатном тарифе Cloudflare — 1000 записей в сутки, поэтому пишем экономно:
 // одна запись на Twitter-проверку (кэш), одна на счётчик лимита, по одной на алерт и подписчика.
 import type { Env } from './env';
-import { intVar } from './env';
+import { intVar, SCANNER_RESERVE } from './env';
 
 const day = (now: number) => new Date(now).toISOString().slice(0, 10);
 
@@ -24,6 +24,12 @@ export async function budgetLeft(env: Env, now: number): Promise<number> {
   const limit = intVar(env.DAILY_TWITTER_BUDGET, 150);
   const used = intVar((await env.KV.get(`budget:${day(now)}`)) ?? undefined, 0);
   return Math.max(0, limit - used);
+}
+
+/** Сколько осталось для запросов от людей (сайт, бот): резерв сканера им недоступен. */
+export async function userBudgetLeft(env: Env, now: number): Promise<number> {
+  const limit = intVar(env.DAILY_TWITTER_BUDGET, 150);
+  return Math.max(0, (await budgetLeft(env, now)) - Math.ceil(limit * SCANNER_RESERVE));
 }
 
 export async function spendBudget(env: Env, now: number): Promise<void> {

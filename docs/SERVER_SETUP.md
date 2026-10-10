@@ -29,7 +29,7 @@
 1. Зарегистрируйтесь на **dash.cloudflare.com** (бесплатный план).
 2. Откройте в меню **Workers & Pages** один раз — так Cloudflare создаст вам адрес вида `ваш-ник.workers.dev`.
 3. Скопируйте **Account ID**: он на главной странице Workers & Pages, справа.
-4. Создайте ключ доступа: аватар (справа вверху) → **My Profile** → **API Tokens** → **Create Token** → шаблон **Edit Cloudflare Workers** → **Use template** → **Continue to summary** → **Create Token**. Скопируйте токен (показывается один раз).
+4. Создайте ключ доступа: аватар (справа вверху) → **My Profile** → **API Tokens** → **Create Token** → шаблон **Edit Cloudflare Workers** → **Use template**. На странице настройки сузьте доступ: **Account Resources** → *Include* → только ваш аккаунт; **Zone Resources** → *Include* → *All zones from an account* → ваш аккаунт (доменов у вас нет, так что это ничего не открывает). По желанию **TTL** — дата окончания (например, через год). → **Continue to summary** → **Create Token**. Скопируйте токен (показывается один раз) и сразу вставьте в GitHub (шаг 4) — больше нигде его не храните.
 
 ## Шаг 3. Telegram-бот
 
