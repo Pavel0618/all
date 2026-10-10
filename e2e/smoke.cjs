@@ -93,6 +93,23 @@ const PAIRS = {
   [RH_TOKEN.toLowerCase()]: pair('robinhood', RH_TOKEN, 'CASHCAT', 'Cash Cat', { mcap: 310000, liq: 61000, priceUsd: '0.00031' }),
 };
 
+// Свечи GeckoTerminal: [время, open, high, low, close, volume], новые первыми — как в настоящем API
+function ohlcv(base, stepSec) {
+  const end = Math.floor(now / 1000 / stepSec) * stepSec;
+  const rows = [];
+  let p = base * 0.6;
+  for (let i = 0; i < 120; i++) {
+    const o = p;
+    const c = p * (1 + Math.sin(i / 6) * 0.03 + 0.005);
+    rows.push([end - (119 - i) * stepSec, o, Math.max(o, c) * 1.01, Math.min(o, c) * 0.99, c, 1000 + (i % 10) * 300]);
+    p = c;
+  }
+  // дубликат последней свечи — приложение должно его убрать
+  rows.push(rows[rows.length - 1]);
+  return rows.reverse();
+}
+const STEP = { minute: 60, hour: 3600, day: 86400 };
+
 const json = (body, status = 200) => ({
   status,
   contentType: 'application/json',
@@ -107,6 +124,7 @@ const jupSwaps = [];
 const kyberRoutes = [];
 const lifiQuotes = [];
 const signalsCalls = [];
+const geckoCalls = [];
 const solRawSent = [];
 const evmRawSent = [];
 const evmRawHosts = [];
@@ -207,6 +225,26 @@ async function routeAll(page) {
     }
 
     if (host === 'api.geckoterminal.com') {
+      geckoCalls.push(url.pathname + url.search);
+      const parts = url.pathname.split('/').filter(Boolean); // api, v2, networks, <сеть>, ...
+      if (parts[2] === 'networks' && !parts[3]) {
+        const list = url.searchParams.get('page') === '1'
+          ? [{ id: 'solana', attributes: { name: 'Solana' } }, { id: 'base', attributes: { name: 'Base' } }, { id: 'robinhood-chain', attributes: { name: 'Robinhood Chain' } }]
+          : [];
+        return route.fulfill(json({ data: list }));
+      }
+      // id сети Robinhood у GeckoTerminal другой — приложение должно найти его по названию
+      if (parts[3] === 'robinhood') return route.fulfill(json({ errors: [{ status: '404', title: 'Not Found' }] }, 404));
+      if (parts[4] === 'pools' && parts[6] === 'ohlcv') {
+        const pool = parts[5];
+        // Пул SCAM GeckoTerminal не знает, и других пулов у токена нет → запасной вариант с DexScreener
+        if (pool === 'pairSCAM') return route.fulfill(json({ errors: [{ status: '404', title: 'Not Found' }] }, 404));
+        const p = Object.values(PAIRS).find((x) => x.pairAddress === pool);
+        const base = p ? parseFloat(p.priceUsd) : 0.0001;
+        const step = STEP[parts[7]] * Number(url.searchParams.get('aggregate') || 1);
+        return route.fulfill(json({ data: { id: 'x', type: 'ohlcv_request_response', attributes: { ohlcv_list: ohlcv(base, step) } } }));
+      }
+      if (parts[4] === 'tokens' && parts[6] === 'pools') return route.fulfill(json({ data: [] }));
       return route.fulfill(
         json({
           data: [FX.tokenA, FX.tokenB, FX.tokenC].map((a, i) => ({
@@ -412,13 +450,35 @@ async function routeAll(page) {
       return route.fulfill(json({ jsonrpc: '2.0', id: body.id, result: '0x' + '0'.repeat(64) }));
     }
 
-    if (host === 'dexscreener.com') {
-      return route.fulfill({ status: 200, contentType: 'text/html', body: '<html><body style="background:#111;color:#888;font:14px sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">DexScreener chart (mock)</body></html>' });
-    }
-
     return route.abort();
   });
 }
+
+// Сколько пикселей цвета свечей нарисовано в графике шага 4 — доказывает, что график не пустой
+const CANDLE_PIXELS = () => {
+  let n = 0;
+  for (const c of document.querySelectorAll('#step-4 .chart canvas')) {
+    if (!c.width || !c.height) continue;
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    for (let i = 0; i < d.length; i += 4) {
+      const up = d[i] < 90 && d[i + 1] > 200 && d[i + 2] > 130 && d[i + 2] < 190;
+      const down = d[i] > 230 && d[i + 1] < 120 && d[i + 2] > 100 && d[i + 2] < 150;
+      if (d[i + 3] > 200 && (up || down)) n++;
+    }
+  }
+  return n;
+};
+async function chartDrawn(pg) {
+  try {
+    await pg.waitForSelector('#step-4 .chart canvas', { timeout: 10000 });
+    await pg.waitForSelector('#step-4 .chart-state', { state: 'detached', timeout: 10000 });
+    await pg.waitForFunction(`(${CANDLE_PIXELS})() > 200`, null, { timeout: 10000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+const lastOhlcv = () => geckoCalls.filter((u) => u.includes('/ohlcv/')).at(-1) ?? '';
 
 const INIT = ({ fx, evmAccount }) => {
   // ---- Тестовый Solana-кошелёк (Wallet Standard) ----
@@ -627,6 +687,17 @@ const TG_INIT = ({ startParam }) => {
   check('Токен A: Twitter-анализ сам закрыл шаги 1–2 → можно входить без ручных ответов', /Можно входить/.test(v1), v1);
   check('Токен A: показаны KOL из Twitter', (await page.locator('#step-2 .kol').count()) === 2);
   check('Токен A: шаг 1 — всплеск упоминаний', /Всплеск интереса: 14 упоминаний/.test(await page.locator('#step-1').innerText()));
+  check('График: свечи нарисованы (без «Loading pair»)', await chartDrawn(page));
+  {
+    const u = lastOhlcv();
+    check('График: пул из DexScreener, 5-минутные свечи, цена нашего токена', u.includes('/networks/solana/pools/pairFROGAI/ohlcv/minute') && u.includes('aggregate=5') && u.includes(`token=${FX.tokenA}`), u);
+  }
+  await page.locator('#step-4 .chart-bar').getByRole('button', { name: '1ч', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#step-4 .chip-active')?.textContent === '1ч');
+  check('График: переключение на часовые свечи', /\/ohlcv\/hour\?aggregate=1&/.test(lastOhlcv()) && (await chartDrawn(page)), lastOhlcv());
+  await page.locator('#step-4 .chart-bar').getByRole('button', { name: '5м', exact: true }).click();
+  await page.locator('#step-4').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(OUT, '02b-token-chart.png') });
   await shot('02-token-go');
 
   // 4. Подключаем Solana-кошелёк и покупаем
@@ -660,6 +731,14 @@ const TG_INIT = ({ startParam }) => {
   await page.locator('.risk-gate input').check();
   await page.waitForSelector('.quote >> text=Вы получите');
   check('Токен C: после подтверждения риска кнопка активна', !(await page.locator('.trade .btn-buy').isDisabled()));
+  {
+    const st = page.locator('#step-4 .chart-state');
+    await st.locator('text=График пока недоступен').waitFor({ timeout: 10000 }).catch(() => {});
+    const txt = (await st.count()) ? await st.innerText() : '';
+    const href = (await st.locator('a').count()) ? await st.locator('a').getAttribute('href') : '';
+    check('График: пул неизвестен GeckoTerminal → понятное сообщение и ссылка на DexScreener', /График пока недоступен/.test(txt) && href === PAIRS[FX.tokenC].url, `${txt} ${href}`);
+    check('График: искал другой пул токена', geckoCalls.some((u) => u.includes(`/tokens/${FX.tokenC}/pools`)));
+  }
   await shot('04-token-danger');
 
   // 7. EVM-токен на Base: ввод адреса без сети
@@ -668,6 +747,7 @@ const TG_INIT = ({ startParam }) => {
   await page.getByRole('button', { name: 'Проверить' }).click();
   await page.waitForURL(/#\/token\/base\//, { timeout: 15000 });
   await page.waitForSelector('.sec-list');
+  check('График Base: свечи нарисованы', (await chartDrawn(page)) && lastOhlcv().includes('/networks/base/pools/pairBASED/'), lastOhlcv());
   await page.locator('.wallet-btn').click();
   await page.getByRole('button', { name: 'TestEVM' }).click();
   await page.waitForSelector('.trade >> text=Переключить сеть на Base', { timeout: 10000 });
@@ -697,6 +777,7 @@ const TG_INIT = ({ startParam }) => {
   await page.waitForSelector('.sec-list', { timeout: 15000 });
   check('Robinhood: контракт проверен через Blockscout', /Blockscout/.test(await page.locator('#step-3').innerText()));
   check('Robinhood: честно — продажа и лок не проверены', (await page.locator('#step-3 .sec-warn').count()) === 2);
+  check('График Robinhood: id сети найден по названию, свечи нарисованы', (await chartDrawn(page)) && lastOhlcv().includes('/networks/robinhood-chain/pools/pairCASHCAT/'), lastOhlcv());
   await page.waitForSelector('.trade >> text=Переключить сеть на Robinhood', { timeout: 10000 });
   await page.locator('.trade .btn-buy').click();
   await page.waitForSelector('.trade >> text=Купить CASHCAT', { timeout: 10000 });
@@ -752,6 +833,7 @@ const TG_INIT = ({ startParam }) => {
   check('TG: диплинк startapp открыл токен', tp.url().endsWith(`#/token/solana/${FX.tokenA}`), tp.url());
   const tgState = () => tp.evaluate(() => window.__tg);
   check('TG: кнопка «Назад» показана, свайп-закрытие отключено', (await tgState()).back.at(-1) === 'show' && (await tgState()).noSwipe === true);
+  check('TG: график рисуется и в Mini App', await chartDrawn(tp));
 
   await tp.locator('.token-head a', { hasText: 'DexScreener' }).click();
   check('TG: внешние ссылки через openLink', (await tgState()).links.some((u) => u.includes('dexscreener.com')));
