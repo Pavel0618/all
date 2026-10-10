@@ -237,6 +237,8 @@ async function routeAll(page) {
       if (parts[3] === 'robinhood') return route.fulfill(json({ errors: [{ status: '404', title: 'Not Found' }] }, 404));
       if (parts[4] === 'pools' && parts[6] === 'ohlcv') {
         const pool = parts[5];
+        // Дневные свечи: «сервис перегружен» — 429 без CORS-заголовка, как это видит браузер
+        if (parts[7] === 'day') return route.fulfill({ status: 429, contentType: 'text/plain', body: 'Too Many Requests' });
         // Пул SCAM GeckoTerminal не знает, и других пулов у токена нет → запасной вариант с DexScreener
         if (pool === 'pairSCAM') return route.fulfill(json({ errors: [{ status: '404', title: 'Not Found' }] }, 404));
         const p = Object.values(PAIRS).find((x) => x.pairAddress === pool);
@@ -479,6 +481,26 @@ async function chartDrawn(pg) {
   }
 }
 const lastOhlcv = () => geckoCalls.filter((u) => u.includes('/ohlcv/')).at(-1) ?? '';
+async function waitCalls(pred, n, ms = 15000) {
+  const end = Date.now() + ms;
+  while (geckoCalls.filter(pred).length < n && Date.now() < end) await new Promise((r) => setTimeout(r, 150));
+  return geckoCalls.filter(pred).length;
+}
+// Пиксели плашки линейки (рост — зелёная, падение — красная)
+const RULER_PIXELS = () => {
+  let n = 0;
+  for (const c of document.querySelectorAll('#step-4 .chart canvas')) {
+    if (!c.width || !c.height) continue;
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    for (let i = 0; i < d.length; i += 4) {
+      const up = Math.abs(d[i] - 31) < 8 && Math.abs(d[i + 1] - 111) < 8 && Math.abs(d[i + 2] - 80) < 8;
+      const down = Math.abs(d[i] - 122) < 8 && Math.abs(d[i + 1] - 42) < 8 && Math.abs(d[i + 2] - 58) < 8;
+      if (up || down) n++;
+    }
+  }
+  return n;
+};
+const measureText = async (pg) => ((await pg.locator('#step-4 .chart-measure').textContent()) ?? '').trim();
 
 const INIT = ({ fx, evmAccount }) => {
   // ---- Тестовый Solana-кошелёк (Wallet Standard) ----
@@ -695,9 +717,56 @@ const TG_INIT = ({ startParam }) => {
   await page.locator('#step-4 .chart-bar').getByRole('button', { name: '1ч', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('#step-4 .chip-active')?.textContent === '1ч');
   check('График: переключение на часовые свечи', /\/ohlcv\/hour\?aggregate=1&/.test(lastOhlcv()) && (await chartDrawn(page)), lastOhlcv());
+  {
+    await page.locator('#step-4 .chart-bar').getByRole('button', { name: '1д', exact: true }).click();
+    const tries = await waitCalls((u) => u.includes('/ohlcv/day'), 3);
+    check('График: сервис перегружен (429) → повторяет запрос', tries >= 3, `попыток: ${tries}`);
+    check('График: 1д собран из уже загруженных 1ч — без ошибки', await chartDrawn(page));
+  }
   await page.locator('#step-4 .chart-bar').getByRole('button', { name: '5м', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#step-4 .chip-active')?.textContent === '5м');
   await page.locator('#step-4').scrollIntoViewIfNeeded();
+  await chartDrawn(page);
   await page.screenshot({ path: path.join(OUT, '02b-token-chart.png') });
+
+  // Линейка: протяжка, клик для сброса, Shift + клик и Esc
+  {
+    const btn = page.locator('#step-4 .chip-tool');
+    // Края свечей при сглаживании иногда дают похожий цвет — сравниваем с фоном до измерения
+    const base = await page.evaluate(RULER_PIXELS);
+    await btn.click();
+    check('Линейка: включилась, подсказка видна', (await page.locator('#step-4 .chart-ruler-hint').count()) === 1);
+    const bb = await page.locator('#step-4 .chart').boundingBox();
+    const P = (fx, fy) => [bb.x + bb.width * fx, bb.y + bb.height * fy];
+    await page.mouse.move(...P(0.2, 0.62));
+    await page.mouse.down();
+    await page.mouse.move(...P(0.62, 0.22), { steps: 8 });
+    await page.mouse.up();
+    const m1 = await measureText(page);
+    check('Линейка: протяжка меряет рост в %, свечи и время', /^\+\d[\d.,]*%.*\d+ свеч.*(мин|ч|д)/.test(m1), m1);
+    await page.waitForFunction(`(${RULER_PIXELS})() > ${base + 300}`, null, { timeout: 5000 }).catch(() => {});
+    const drawn = await page.evaluate(RULER_PIXELS);
+    check('Линейка: измерение нарисовано на графике', drawn > base + 300, `пикселей плашки: ${drawn}, фон: ${base}`);
+    check('Линейка: после измерения график снова листается', (await btn.getAttribute('aria-pressed')) === 'false');
+    await page.screenshot({ path: path.join(OUT, '02c-ruler.png') });
+
+    await page.waitForTimeout(450);
+    await page.mouse.click(...P(0.45, 0.5));
+    await page.waitForTimeout(200);
+    const left = await page.evaluate(RULER_PIXELS);
+    const txt = await measureText(page);
+    check('Линейка: клик по графику убирает измерение', txt === '' && left <= base + 30, `текст: «${txt}», пикселей: ${left}, фон: ${base}`);
+
+    await page.keyboard.down('Shift');
+    await page.mouse.click(...P(0.3, 0.25));
+    await page.keyboard.up('Shift');
+    await page.mouse.move(...P(0.55, 0.62), { steps: 5 });
+    await page.mouse.click(...P(0.55, 0.62));
+    const m2 = await measureText(page);
+    check('Линейка: Shift + клик и второй клик — падение в %', /^−\d/.test(m2), m2);
+    await page.keyboard.press('Escape');
+    check('Линейка: Esc убирает измерение', (await measureText(page)) === '');
+  }
   await shot('02-token-go');
 
   // 4. Подключаем Solana-кошелёк и покупаем
@@ -733,10 +802,10 @@ const TG_INIT = ({ startParam }) => {
   check('Токен C: после подтверждения риска кнопка активна', !(await page.locator('.trade .btn-buy').isDisabled()));
   {
     const st = page.locator('#step-4 .chart-state');
-    await st.locator('text=График пока недоступен').waitFor({ timeout: 10000 }).catch(() => {});
+    await st.locator('text=Для этой монеты пока нет графика').waitFor({ timeout: 10000 }).catch(() => {});
     const txt = (await st.count()) ? await st.innerText() : '';
     const href = (await st.locator('a').count()) ? await st.locator('a').getAttribute('href') : '';
-    check('График: пул неизвестен GeckoTerminal → понятное сообщение и ссылка на DexScreener', /График пока недоступен/.test(txt) && href === PAIRS[FX.tokenC].url, `${txt} ${href}`);
+    check('График: пул неизвестен GeckoTerminal → понятное сообщение и ссылка на DexScreener', /Для этой монеты пока нет графика/.test(txt) && href === PAIRS[FX.tokenC].url, `${txt} ${href}`);
     check('График: искал другой пул токена', geckoCalls.some((u) => u.includes(`/tokens/${FX.tokenC}/pools`)));
   }
   await shot('04-token-danger');
@@ -834,6 +903,21 @@ const TG_INIT = ({ startParam }) => {
   const tgState = () => tp.evaluate(() => window.__tg);
   check('TG: кнопка «Назад» показана, свайп-закрытие отключено', (await tgState()).back.at(-1) === 'show' && (await tgState()).noSwipe === true);
   check('TG: график рисуется и в Mini App', await chartDrawn(tp));
+  {
+    // Линейка пальцем: касания как на телефоне
+    await tp.locator('#step-4').scrollIntoViewIfNeeded();
+    await tp.locator('#step-4 .chip-tool').click();
+    const bb = await tp.locator('#step-4 .chart').boundingBox();
+    const pt = (fx, fy) => ({ x: bb.x + bb.width * fx, y: bb.y + bb.height * fy });
+    const cdp = await tctx.newCDPSession(tp);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [pt(0.2, 0.62)] });
+    for (let i = 1; i <= 6; i++) await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [pt(0.2 + 0.07 * i, 0.62 - 0.06 * i)] });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    const m = await measureText(tp);
+    check('TG: линейка пальцем меряет рост', /^\+\d/.test(m), m);
+    await tshot('tg-02-ruler');
+    await tp.keyboard.press('Escape');
+  }
 
   await tp.locator('.token-head a', { hasText: 'DexScreener' }).click();
   check('TG: внешние ссылки через openLink', (await tgState()).links.some((u) => u.includes('dexscreener.com')));

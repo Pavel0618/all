@@ -904,6 +904,43 @@ main {
   position: absolute;
   inset: 0;
 }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.chip-tool {
+  white-space: nowrap;
+}
+.chip:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+/* Слой линейки: перехватывает касания, чтобы график не прокручивался под пальцем */
+.chart-ruler-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  cursor: crosshair;
+  touch-action: none;
+}
+.chart-ruler-hint {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  max-width: max-content;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(21, 26, 36, 0.92);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 12px;
+  pointer-events: none;
+}
 .chart-state {
   position: absolute;
   inset: 0;

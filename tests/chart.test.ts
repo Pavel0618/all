@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getCandles } from '../src/lib/gecko';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { aggregateCandles, geckoTuning, getCandles } from '../src/lib/gecko';
 import { axisPrice, minMoveFor } from '../src/components/PriceChart';
+import { barsLabel, fmtDuration, fmtMeasurePct, indexToTime, measure, timeToIndex } from '../src/components/chartRuler';
 
 const TOKEN = 'FrogAi1111111111111111111111111111111111111';
 
@@ -8,6 +9,8 @@ const ok = (body: unknown) => Promise.resolve(new Response(JSON.stringify(body),
 const status = (code: number) => Promise.resolve(new Response('{"errors":[]}', { status: code }));
 const ohlcv = (rows: number[][]) => ok({ data: { attributes: { ohlcv_list: rows } } });
 
+// В тестах без пауз: лимит запросов и задержки повторов — минимальные
+beforeEach(() => Object.assign(geckoTuning, { burst: 1_000, refillMs: 1, retryDelays: [1, 1] }));
 afterEach(() => vi.unstubAllGlobals());
 
 function stubFetch(handler: (url: string) => Promise<Response>) {
@@ -78,6 +81,117 @@ describe('свечи GeckoTerminal', () => {
       return status(404);
     });
     await expect(getCandles('solana', 'nopool', TOKEN, '5m')).rejects.toThrow();
+  });
+});
+
+describe('сервис графиков перегружен', () => {
+  const row = (t: number, c = 1) => [t, c, c, c, c, 1];
+
+  it('429 — повторяет запрос и получает свечи', async () => {
+    let n = 0;
+    const fn = stubFetch(() => (++n < 3 ? status(429) : ohlcv([row(100)])));
+    expect(await getCandles('solana', 'poolBusy', TOKEN, '5m')).toHaveLength(1);
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
+
+  it('обрыв без CORS (так браузер видит 429) — тоже повторяет', async () => {
+    let n = 0;
+    stubFetch(() => (++n < 2 ? Promise.reject(new TypeError('Failed to fetch')) : ohlcv([row(100)])));
+    expect(await getCandles('solana', 'poolCors', TOKEN, '5m')).toHaveLength(1);
+  });
+
+  it('404 не повторяет — это не перегрузка', async () => {
+    const fn = stubFetch((url) => (url.includes('/networks?page=1') ? ok({ data: [{ id: 'solana' }] }) : url.includes('/tokens/') ? ok({ data: [] }) : status(404)));
+    // свой адрес токена — чтобы не взять из кэша ответы прошлых тестов
+    await expect(getCandles('solana', 'poolGone', 'GoneToken111', '5m')).rejects.toThrow();
+    expect(fn.mock.calls.filter((c) => String(c[0]).includes('/ohlcv/'))).toHaveLength(1);
+  });
+
+  it('1ч недоступен → собирает из уже загруженных 15м', async () => {
+    const base = 1_700_000_000 - (1_700_000_000 % 3600);
+    stubFetch((url) => {
+      if (url.includes('/ohlcv/minute')) return ohlcv([row(base, 1), row(base + 900, 3), row(base + 1800, 2), row(base + 3600, 5)]);
+      return status(429);
+    });
+    expect(await getCandles('solana', 'poolAgg', TOKEN, '15m')).toHaveLength(4);
+    const hour = await getCandles('solana', 'poolAgg', TOKEN, '1h');
+    expect(hour.map((c) => [c.time, c.open, c.high, c.close, c.volume])).toEqual([
+      [base, 1, 3, 2, 3],
+      [base + 3600, 5, 5, 5, 1],
+    ]);
+  });
+
+  it('тот же период недоступен → показывает последние загруженные свечи', async () => {
+    let fail = false;
+    stubFetch(() => (fail ? status(503) : ohlcv([row(100), row(160)])));
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      expect(await getCandles('base', 'poolStale', TOKEN, '1m')).toHaveLength(2);
+      fail = true;
+      vi.setSystemTime(Date.now() + 120_000); // кэш HTTP устарел — идёт настоящий запрос, и он падает
+      expect(await getCandles('base', 'poolStale', TOKEN, '1m')).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('запасных свечей нет → честная ошибка', async () => {
+    stubFetch(() => status(429));
+    await expect(getCandles('solana', 'poolNoCache', TOKEN, '4h')).rejects.toThrow();
+  });
+
+  it('лимит запросов: после запаса — не чаще заданного интервала', async () => {
+    Object.assign(geckoTuning, { burst: 2, refillMs: 40 });
+    stubFetch(() => ohlcv([row(100)]));
+    // израсходовать накопленный запас
+    await Promise.all(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'].map((p) => getCandles('arbitrum', `warm${p}`, TOKEN, '5m')));
+    const t0 = Date.now();
+    await Promise.all(['k', 'l', 'm', 'n'].map((p) => getCandles('arbitrum', `lim${p}`, TOKEN, '5m')));
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(100);
+  });
+
+  it('склейка свечей по границам UTC', () => {
+    const list = [row(0, 1), row(60, 2), row(120, 0.5), row(300, 4)].map(([time, o, h, l, c, v]) => ({ time, open: o, high: h, low: l, close: c, volume: v }));
+    expect(aggregateCandles(list, 300)).toEqual([
+      { time: 0, open: 1, high: 2, low: 0.5, close: 0.5, volume: 3 },
+      { time: 300, open: 4, high: 4, low: 4, close: 4, volume: 1 },
+    ]);
+  });
+});
+
+describe('линейка', () => {
+  const list = [0, 300, 600, 1200].map((time, i) => ({ time, open: 1, high: 1, low: 1, close: 1 + i, volume: 1 }));
+
+  it('номер свечи ↔ время, включая пропуски и область за краями', () => {
+    expect(indexToTime(list, 2, 300)).toBe(600);
+    expect(indexToTime(list, 5, 300)).toBe(1800);
+    expect(indexToTime(list, -1, 300)).toBe(-300);
+    expect(timeToIndex(list, 1200, 300)).toBe(3);
+    expect(timeToIndex(list, 900, 300)).toBe(2.5);
+    expect(timeToIndex(list, 1800, 300)).toBe(5);
+  });
+
+  it('считает % роста, свечи и время', () => {
+    const m = measure({ time: 0, price: 0.0002 }, { time: 1200, price: 0.00025 }, list, 300);
+    expect(m.pct).toBeCloseTo(25, 6);
+    expect(m.bars).toBe(3);
+    expect(m.seconds).toBe(1200);
+    expect(m.up).toBe(true);
+    expect(measure({ time: 1200, price: 2 }, { time: 0, price: 1 }, list, 300)).toMatchObject({ pct: -50, up: false, bars: 3 });
+  });
+
+  it('подписи', () => {
+    expect(fmtMeasurePct(23.456)).toBe('+23.46%');
+    expect(fmtMeasurePct(-12.5)).toBe('−12.50%');
+    expect(fmtMeasurePct(250)).toBe('+250.00% (×3.5)');
+    expect(fmtMeasurePct(1900)).toBe('+1,900% (×20)');
+    expect(fmtDuration(45 * 60)).toBe('45 мин');
+    expect(fmtDuration(3 * 3600 + 15 * 60)).toBe('3 ч 15 мин');
+    expect(fmtDuration(2 * 86400 + 4 * 3600)).toBe('2 д 4 ч');
+    expect(barsLabel(1)).toBe('1 свеча');
+    expect(barsLabel(3)).toBe('3 свечи');
+    expect(barsLabel(12)).toBe('12 свечей');
+    expect(barsLabel(22)).toBe('22 свечи');
   });
 });
 
