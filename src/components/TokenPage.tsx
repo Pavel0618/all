@@ -11,6 +11,7 @@ import { useSignals, type SignalsState } from '../lib/signals';
 import { SecurityList, StepCard, VerdictCard, type ToolLink } from './Steps';
 import { TokenIcon } from './TokenCard';
 import { TradePanel } from './TradePanel';
+import { PriceChart } from './PriceChart';
 
 async function copy(text: string, what: string) {
   try {
@@ -301,13 +302,7 @@ export function TokenPage({ chain: chainParam, address }: { chain: string; addre
         }}
       >
         {pair && (
-          <div className="chart">
-            <iframe
-              title="График"
-              src={`https://dexscreener.com/${pair.chainId}/${pair.pairAddress}?embed=1&loadChartSettings=0&trades=0&tabs=0&info=0&chartLeftToolbar=0&chartTheme=dark&theme=dark&chartStyle=1&chartType=usdPrice&interval=5`}
-              loading="lazy"
-            />
-          </div>
+          <PriceChart chain={chain} pool={pair.pairAddress} token={address} dexUrl={pair.url ?? toolLinks.dexscreenerToken(chain, address)} />
         )}
       </StepCard>
 
