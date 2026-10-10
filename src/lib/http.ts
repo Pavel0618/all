@@ -12,6 +12,12 @@ export class HttpError extends Error {
 
 const cache = new Map<string, { at: number; data: unknown }>();
 
+/** Есть ли свежий ответ в кэше — тогда запрос не тратит лимит API */
+export function isFresh(url: string, ttlMs: number): boolean {
+  const hit = cache.get(url);
+  return Boolean(hit && Date.now() - hit.at < ttlMs);
+}
+
 export async function getJson<T>(url: string, opts: { ttlMs?: number; timeoutMs?: number; headers?: Record<string, string> } = {}): Promise<T> {
   const { ttlMs = 15_000, timeoutMs = 15_000, headers } = opts;
   const hit = cache.get(url);
