@@ -13,6 +13,22 @@ crons = ["*/15 * * * *"]
 [[kv_namespaces]]
 binding = "KV"
 
+# Защита от злоупотреблений: Twitter-проверки стоят денег и ограничены дневным лимитом,
+# поэтому один IP (сайт) или один чат (бот) не может отправлять их пачками
+[[ratelimits]]
+name = "SIGNALS_LIMIT"
+namespace_id = "4663001"
+  [ratelimits.simple]
+  limit = 20
+  period = 60
+
+[[ratelimits]]
+name = "BOT_LIMIT"
+namespace_id = "4663002"
+  [ratelimits.simple]
+  limit = 8
+  period = 60
+
 [vars]
 DAILY_TWITTER_BUDGET = "120"
 SCAN_TWITTER_PER_RUN = "1"

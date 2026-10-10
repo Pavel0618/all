@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildQuery, computeSignals, hypeFromSignals, influencersFromSignals, normalizeTweet, type Tweet } from '../src/lib/twitterSignals';
-import worker from '../worker/src/index';
+import worker, { sameSecret } from '../worker/src/index';
+import { getSignals, loadToken } from '../worker/src/analyze';
 import { scan, SCAN_INTERVAL_MS } from '../worker/src/scanner';
 import { webhookSecret } from '../worker/src/telegram';
 import type { Env } from '../worker/src/env';
@@ -189,7 +190,8 @@ describe('сервер: /signals', () => {
     const r1 = await req();
     const body = (await r1.json()) as { signals: { lastHour: number; kolCount: number }; symbol: string; handle: string };
     expect(r1.status).toBe(200);
-    expect(r1.headers.get('Access-Control-Allow-Origin')).toBe('*');
+    // Браузерам разрешён только наш сайт
+    expect(r1.headers.get('Access-Control-Allow-Origin')).toBe('https://example.github.io');
     expect(body.symbol).toBe('FROG');
     expect(body.handle).toBe('frog');
     expect(body.signals.kolCount).toBe(2);
@@ -207,6 +209,36 @@ describe('сервер: /signals', () => {
     const res = (await (await worker.fetch(new Request(`https://w.dev/signals?chain=solana&address=${B}`), env, ctx())).json()) as { error: string };
     expect(res.error).toBe('budget');
     expect(calls.twitter).toHaveLength(0);
+  });
+
+  it('сайт и бот не тратят резерв сканера; сканеру он доступен', async () => {
+    const R = 'FroG8888888888888888888888888888888888888hh';
+    // лимит 8, резерв сканера 25% = 2 проверки; потрачено 6 → людям уже нельзя
+    const env = makeEnv({ DAILY_TWITTER_BUDGET: '8' });
+    env.KV.m.set('budget:2026-10-08', '6');
+    const calls = mockWorld({ [R]: pair('solana', R, 'FROGR') });
+    const res = (await (await worker.fetch(new Request(`https://w.dev/signals?chain=solana&address=${R}`), env, ctx())).json()) as { error: string };
+    expect(res.error).toBe('budget');
+    expect(calls.twitter).toHaveLength(0);
+    const token = (await loadToken('solana', R))!;
+    const scan = await getSignals(env, token, NOW, 'scan');
+    expect('signals' in scan).toBe(true);
+  });
+
+  it('частые запросы с одного IP получают 429 и не тратят лимит', async () => {
+    const L = 'FroG9999999999999999999999999999999999999jj';
+    const seen: string[] = [];
+    const limiter = { limit: async ({ key }: { key: string }) => (seen.push(key), { success: seen.length <= 1 }) };
+    const env = makeEnv({ SIGNALS_LIMIT: limiter as unknown as RateLimit });
+    const calls = mockWorld({ [L]: pair('solana', L, 'FROGL') });
+    const req = () => worker.fetch(new Request(`https://w.dev/signals?chain=solana&address=${L}`, { headers: { 'CF-Connecting-IP': '203.0.113.7' } }), env, ctx());
+    expect((await req()).status).toBe(200);
+    const twitterCalls = calls.twitter.length;
+    const second = await req();
+    expect(second.status).toBe(429);
+    expect(second.headers.get('Retry-After')).toBe('60');
+    expect(calls.twitter.length).toBe(twitterCalls);
+    expect(seen).toEqual(['203.0.113.7', '203.0.113.7']);
   });
 
   it('без ключа — not_configured, мусорные адреса — 400, неизвестные — 404', async () => {
@@ -251,6 +283,20 @@ describe('Telegram-бот', () => {
     const env = makeEnv();
     mockWorld({});
     expect((await send(env, '/start', 'wrong')).status).toBe(403);
+    const good = await webhookSecret(env.TELEGRAM_BOT_TOKEN!);
+    expect((await send(env, '/start', good.slice(0, -1) + (good.endsWith('0') ? '1' : '0'))).status).toBe(403);
+    expect(sameSecret(null, good)).toBe(false);
+    expect(sameSecret(good, good)).toBe(true);
+  });
+
+  it('частые проверки из одного чата притормаживаются', async () => {
+    let n = 0;
+    const env = makeEnv({ BOT_LIMIT: { limit: async () => ({ success: ++n <= 1 }) } as unknown as RateLimit });
+    const calls = mockWorld({ [D]: pair('solana', D, 'FROGD') });
+    await send(env, D);
+    await send(env, D);
+    const texts = calls.telegram.filter((c) => c.method === 'sendMessage').map((c) => String(c.body.text));
+    expect(texts.at(-1)).toMatch(/подождите минуту/);
   });
 
   it('/start подписывает и даёт кнопку Mini App', async () => {

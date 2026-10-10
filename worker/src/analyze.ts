@@ -6,7 +6,7 @@ import { DEFAULT_NARRATIVES } from '../../src/lib/narratives';
 import { checkSecurity, type SecurityReport } from '../../src/lib/security';
 import type { TwitterSignals } from '../../src/lib/twitterSignals';
 import type { Env } from './env';
-import { budgetLeft, getJsonKV, putJsonKV, spendBudget } from './store';
+import { budgetLeft, getJsonKV, putJsonKV, spendBudget, userBudgetLeft } from './store';
 import { fetchTwitterSignals } from './twitter';
 
 /** Сколько Twitter-анализ считается свежим (секунд) */
@@ -51,8 +51,11 @@ const memory = new Map<string, TwitterSignals>();
 
 export type SignalsResult = { signals: TwitterSignals; cached: boolean } | { error: 'not_configured' | 'budget' | 'failed'; message?: string };
 
-/** Twitter-анализ с кэшем на 30 минут и дневным лимитом расходов. */
-export async function getSignals(env: Env, token: TokenInfo, now: number): Promise<SignalsResult> {
+/**
+ * Twitter-анализ с кэшем на 30 минут и дневным лимитом расходов.
+ * source: 'user' — запрос от человека (сайт, бот), ему недоступен резерв сканера; 'scan' — сканер алертов.
+ */
+export async function getSignals(env: Env, token: TokenInfo, now: number, source: 'user' | 'scan' = 'user'): Promise<SignalsResult> {
   const key = `sig:${token.chain}:${token.address.toLowerCase()}`;
   const fresh = (s?: TwitterSignals) => s && now - s.fetchedAt < SIGNALS_TTL * 1000;
   const mem = memory.get(key);
@@ -64,7 +67,8 @@ export async function getSignals(env: Env, token: TokenInfo, now: number): Promi
   }
 
   if (!env.TWITTERAPI_KEY) return { error: 'not_configured' };
-  if ((await budgetLeft(env, now)) <= 0) return { error: 'budget' };
+  const left = source === 'scan' ? await budgetLeft(env, now) : await userBudgetLeft(env, now);
+  if (left <= 0) return { error: 'budget' };
   await spendBudget(env, now);
   try {
     const signals = await fetchTwitterSignals(env, { address: token.address, symbol: token.symbol, handle: token.socials.twitter }, now);
@@ -89,13 +93,13 @@ export async function fullReport(
   env: Env,
   token: TokenInfo,
   now: number,
-  opts: { twitter: boolean; security?: SecurityReport },
+  opts: { twitter: boolean; security?: SecurityReport; source?: 'user' | 'scan' },
 ): Promise<FullReport> {
   const security = opts.security ?? (await checkSecurity(token.chain, token.address, token.pair.dexId));
   let signals: TwitterSignals | undefined;
   let signalsError: string | undefined;
   if (opts.twitter) {
-    const r = await getSignals(env, token, now);
+    const r = await getSignals(env, token, now, opts.source);
     if ('signals' in r) signals = r.signals;
     else signalsError = r.error;
   }

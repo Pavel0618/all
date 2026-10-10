@@ -75,12 +75,34 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultBuy: {},
 };
 
-export const settingsStore = createStore<Settings>('gr.settings', DEFAULT_SETTINGS, (s) => ({
-  ...DEFAULT_SETTINGS,
-  ...s,
-  thresholds: { ...DEFAULT_THRESHOLDS, ...s.thresholds },
-  narratives: s.narratives?.length ? s.narratives : DEFAULT_NARRATIVES,
-}));
+/** Самый большой slippage в интерфейсе — 20%. Больше — подарок сэндвич-ботам. */
+export const MAX_SLIPPAGE_BPS = 2000;
+const PRIORITIES: PriorityLevel[] = ['medium', 'high', 'veryHigh'];
+
+/**
+ * Настройки из localStorage — чужие данные: на адресе <ник>.github.io его могут менять другие сайты того же ника.
+ * Поэтому slippage ограничиваем, RPC принимаем только https, приоритет — только из списка.
+ */
+export function sanitizeSettings(s: Partial<Settings>): Settings {
+  const slip = Math.round(Number(s.slippageBps));
+  let rpc = DEFAULT_SETTINGS.solanaRpc;
+  try {
+    if (typeof s.solanaRpc === 'string' && new URL(s.solanaRpc).protocol === 'https:') rpc = s.solanaRpc;
+  } catch {
+    /* не адрес */
+  }
+  return {
+    ...DEFAULT_SETTINGS,
+    ...s,
+    solanaRpc: rpc,
+    slippageBps: Number.isFinite(slip) ? Math.min(MAX_SLIPPAGE_BPS, Math.max(10, slip)) : DEFAULT_SETTINGS.slippageBps,
+    priority: PRIORITIES.includes(s.priority as PriorityLevel) ? (s.priority as PriorityLevel) : DEFAULT_SETTINGS.priority,
+    thresholds: { ...DEFAULT_THRESHOLDS, ...s.thresholds },
+    narratives: Array.isArray(s.narratives) && s.narratives.length ? s.narratives : DEFAULT_NARRATIVES,
+  };
+}
+
+export const settingsStore = createStore<Settings>('gr.settings', DEFAULT_SETTINGS, sanitizeSettings);
 
 // ---------- Избранное ----------
 

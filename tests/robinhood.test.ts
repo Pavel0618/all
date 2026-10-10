@@ -91,7 +91,11 @@ describe('проверка контракта по Blockscout', () => {
 });
 
 describe('обмен: KyberSwap → LI.FI', () => {
+  const LIFI_DIAMOND = '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE';
+  let diamond = LIFI_DIAMOND;
+
   it('если KyberSwap не знает сеть, котировка и транзакция идут через LI.FI', async () => {
+    diamond = LIFI_DIAMOND;
     const calls: string[] = [];
     vi.stubGlobal(
       'fetch',
@@ -100,8 +104,8 @@ describe('обмен: KyberSwap → LI.FI', () => {
         if (url.includes('kyberswap')) return ok({ code: 4008, message: 'chain not supported' });
         if (url.includes('li.quest')) {
           return ok({
-            estimate: { fromAmount: '1000', toAmount: '5000', approvalAddress: '0xspender', fromAmountUSD: '3', toAmountUSD: '2.9' },
-            transactionRequest: { to: '0xdiamond', data: '0xabcdef', value: '0x3e8' },
+            estimate: { fromAmount: '1000', toAmount: '5000', approvalAddress: LIFI_DIAMOND, fromAmountUSD: '3', toAmountUSD: '2.9' },
+            transactionRequest: { to: diamond, data: '0xabcdef', value: '0x3e8' },
           });
         }
         return notFound();
@@ -112,10 +116,27 @@ describe('обмен: KyberSwap → LI.FI', () => {
     expect(q.provider).toBe('LI.FI');
     expect(q.amountOut).toBe('5000');
     const tx = await evmBuild(side, q, '0xme', 500);
-    expect(tx).toMatchObject({ to: '0xdiamond', data: '0xabcdef', value: 1000n });
+    expect(tx).toMatchObject({ to: LIFI_DIAMOND, data: '0xabcdef', value: 1000n });
     const lifiUrl = new URL(calls.filter((c) => c.includes('li.quest')).at(-1)!);
     expect(lifiUrl.searchParams.get('fromChain')).toBe('4663');
     expect(lifiUrl.searchParams.get('slippage')).toBe('0.05');
+  });
+
+  it('LI.FI вернул транзакцию на чужой контракт — сделка останавливается', async () => {
+    diamond = '0x000000000000000000000000000000000000dEaD';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (url.includes('kyberswap')) return ok({ code: 4008, message: 'chain not supported' });
+        return ok({
+          estimate: { fromAmount: '1000', toAmount: '5000', approvalAddress: LIFI_DIAMOND },
+          transactionRequest: { to: diamond, data: '0xabcdef', value: '0x3e8' },
+        });
+      }),
+    );
+    const side = { chain: 'robinhood' as const, buy: true, token: TOKEN, amountIn: 1000n };
+    const q = await evmQuote(side, '0xme');
+    await expect(evmBuild(side, q, '0xme', 500)).rejects.toThrow(/Сделка остановлена/);
   });
 });
 

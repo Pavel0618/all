@@ -5,7 +5,8 @@ import { useConnection } from '@solana/wallet-adapter-react';
 import { LAMPORTS_PER_SOL, PublicKey, type ParsedAccountData } from '@solana/web3.js';
 import type { Address } from 'viem';
 import { CHAINS, toolLinks, type ChainId } from '../lib/chains';
-import { jupQuote, jupSwapTransaction, priceImpactPercent, routeLabel, SOL_MINT, waitForSignature, type JupQuote } from '../lib/jupiter';
+import { jupQuote, jupSwapTransaction, priceImpactPercent, priorityCapLamports, routeLabel, SOL_MINT, waitForSignature, type JupQuote } from '../lib/jupiter';
+import { assertSafeJupiterTx, UnsafeTxError } from '../lib/txGuard';
 import { evmBuild, evmQuote, type EvmQuote, type SwapSide } from '../lib/evmSwap';
 import { evmFeeFor, feeConfigured, feePercentLabel, solanaFeeFor, type SolanaFee } from '../lib/fees';
 import { useSolSigner } from '../wallet/solSigner';
@@ -31,6 +32,7 @@ const SLIPPAGES = [100, 300, 500, 1000, 2000];
 const SELL_PCTS = [25, 50, 100];
 
 function humanError(e: unknown): string {
+  if (e instanceof UnsafeTxError) return e.message;
   const msg = (e as Error)?.message ?? String(e);
   if (/reject|denied|cancel|declined/i.test(msg)) return 'Операция отменена в кошельке';
   if (/insufficient|not enough|0x1\b/i.test(msg)) return 'Недостаточно средств на кошельке (с учётом комиссии сети)';
@@ -323,6 +325,8 @@ function SolanaTrade({ token, mode, blocked }: { token: TradeToken; mode: Mode; 
         built = await jupSwapTransaction(q, owner.toBase58(), settings.priority);
       }
       const { tx, lastValidBlockHeight } = built;
+      // Подписываем только обмен Jupiter без лишних переводов — даже если ответ API подменили
+      assertSafeJupiterTx(tx, owner, priorityCapLamports(settings.priority));
       setBusy(signer.kind === 'builtin' ? 'Отправляем…' : 'Подтвердите в кошельке…');
       const sig = await signer.send(tx, connection);
       setBusy('Ждём подтверждения сети…');

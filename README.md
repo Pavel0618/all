@@ -133,11 +133,18 @@ src/lib/telegram.ts      Telegram Mini App: запуск, «Назад», виб
 src/lib/twitterSignals.ts  Twitter-сигналы шагов 1, 2, 5 (общий код сайта и сервера)
 src/lib/blockscout.ts    своя проверка контракта по Blockscout (Robinhood, свежие токены)
 src/lib/evmSwap.ts       обмен в EVM: KyberSwap → резервный LI.FI
+src/lib/txGuard.ts       проверка транзакций агрегаторов перед подписью
 src/config.ts            настройки владельца: комиссия, адреса, бот
 src/wallet/              кошельки: Wallet Standard, EIP-6963 и встроенный кошелёк Telegram
 worker/                  сервер (Cloudflare Worker): /signals, Telegram-бот, сканер алертов
 src/components/          экраны: Радар, Токен (шаги 1–5), Покупка, Портфель, Методика, Настройки
 ```
+
+## Безопасность
+
+Приложение проверено «глазами атакующего»: подмена сделок агрегатором, кража ключей, выжигание лимитов
+сервера, атаки на публикацию. Что закрыто в коде и **что владельцу нужно включить самому** (2FA, защита
+ветки `main`, оповещения GitHub), описано в [`docs/SECURITY.md`](docs/SECURITY.md).
 
 ## Варианты развития
 
